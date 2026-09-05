@@ -8,10 +8,11 @@ disk before the importer is called.
 import os
 import shutil
 import tempfile
+from unittest import mock
 
 from django.test import SimpleTestCase, TestCase, override_settings
 
-from mutint_breseq import runner
+from mutint_breseq import pairing, runner
 
 
 class ArgvTestCase(SimpleTestCase):
@@ -65,6 +66,43 @@ class ArgvTestCase(SimpleTestCase):
 
     def test_nothing_is_injected_without_a_count(self):
         self.assertNotIn("-j", self.build(processors=None))
+
+
+class FastpArgvTestCase(SimpleTestCase):
+    def test_a_pair_gets_both_mates_and_the_paired_adapter_flag(self):
+        read_set = pairing.ReadFileSet("s_RX", ["/reads/s_R1.fastq.gz", "/reads/s_R2.fastq.gz"])
+        argv = runner.build_fastp_argv("/bin/fastp", read_set, "/run/trimmed", threads=4)
+        self.assertEqual("/bin/fastp", argv[0])
+        # brefito's options, and no others: adapter trimming with quality filtering off.
+        self.assertIn("--disable_quality_filtering", argv)
+        self.assertIn("--detect_adapter_for_pe", argv)
+        self.assertEqual("4", argv[argv.index("--thread") + 1])
+        self.assertEqual("/reads/s_R1.fastq.gz", argv[argv.index("-i") + 1])
+        self.assertEqual("/reads/s_R2.fastq.gz", argv[argv.index("-I") + 1])
+        self.assertEqual("/run/trimmed/s_R1.fastq.gz", argv[argv.index("-o") + 1])
+        self.assertEqual("/run/trimmed/s_R2.fastq.gz", argv[argv.index("-O") + 1])
+        self.assertEqual("/run/trimmed/s_RX.fastp.json", argv[argv.index("-j") + 1])
+        self.assertEqual("/run/trimmed/s_RX.fastp.html", argv[argv.index("-h") + 1])
+
+    def test_a_single_file_gets_neither(self):
+        argv = runner.build_fastp_argv(
+            "/bin/fastp", pairing.ReadFileSet("s", ["/reads/s.fastq"]), "/run/trimmed")
+        self.assertNotIn("-I", argv)
+        self.assertNotIn("--detect_adapter_for_pe", argv)
+        self.assertNotIn("--thread", argv)
+
+    def test_nothing_that_would_filter_reads_is_passed(self):
+        argv = runner.build_fastp_argv(
+            "/bin/fastp", pairing.ReadFileSet("s", ["/reads/s.fastq"]), "/run/trimmed")
+        for flag in ("--length_required", "--cut_right", "--cut_front", "--cut_tail",
+                     "--dedup", "-q", "-u", "-n"):
+            self.assertNotIn(flag, argv)
+
+    def test_threads_are_capped_where_fastp_caps_them(self):
+        with mock.patch.object(runner, "default_processors", return_value=64):
+            self.assertEqual(16, runner.fastp_threads())
+        with mock.patch.object(runner, "default_processors", return_value=None):
+            self.assertIsNone(runner.fastp_threads())
 
 
 class ToolEnvironmentTestCase(TestCase):
@@ -121,10 +159,12 @@ class CleanupTestCase(SimpleTestCase):
         os.makedirs(os.path.join(self.output_dir, "data"))
         os.makedirs(os.path.join(self.output_dir, "output", "evidence"))
         os.makedirs(os.path.join(self.run_dir, "reads"))
+        os.makedirs(os.path.join(self.run_dir, "trimmed"))
         for path in (os.path.join(self.output_dir, "data", "reference.bam"),
                      os.path.join(self.output_dir, "output", "index.html"),
                      os.path.join(self.output_dir, "output", "evidence", "e.html"),
-                     os.path.join(self.run_dir, "reads", "r1.fastq")):
+                     os.path.join(self.run_dir, "reads", "r1.fastq"),
+                     os.path.join(self.run_dir, "trimmed", "r1.fastq")):
             with open(path, "w") as handle:
                 handle.write("x")
 
@@ -138,6 +178,7 @@ class CleanupTestCase(SimpleTestCase):
         runner.cleanup_after_import(self.run_dir, self.output_dir)
 
         self.assertFalse(os.path.exists(os.path.join(self.run_dir, "reads")))
+        self.assertFalse(os.path.exists(os.path.join(self.run_dir, "trimmed")))
         self.assertFalse(os.path.exists(self.output_dir))
 
     def test_a_run_with_no_output_directory_is_fine(self):

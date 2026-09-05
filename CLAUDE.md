@@ -31,8 +31,9 @@ a project's `.gitmodules` is how a component is not installed.
 
 | file | what |
 |---|---|
-| `runner.py` | pure: the argv, the PATH, what counts as usable output, what to keep |
-| `tasks.py` | the `@task` — run breseq, check, import, clean up |
+| `runner.py` | pure: both argvs (fastp's and breseq's), the PATH, what counts as usable output, what to keep |
+| `pairing.py` | pure: breseq's rule for which read files are mates, and which files fastp must not touch |
+| `tasks.py` | the `@task` — trim, run breseq, check, import, clean up |
 | `views.py` | the page, the launch endpoint, the run list |
 | `models.py` | `BreseqRun`, and the receiver that owns its directory |
 
@@ -118,10 +119,28 @@ on the queue and put a traceback in front of somebody who got what they asked fo
 status, and it is the one path that **deletes** the reads and the partial output: a failure is
 something to diagnose, a cancellation is not.
 
-Three places poll, and the third is easy to forget: at task entry (a job cancelled while queued
-is still handed to a worker, because `request_cancel` deliberately never touches the queue row),
-inside the run loop, and while waiting for the import lock -- that wait can be half an hour, and
-a wait nobody can give up on is the same dead end as a job nobody can stop.
+Four places poll, and the last two are easy to forget: at task entry (a job cancelled while
+queued is still handed to a worker, because `request_cancel` deliberately never touches the
+queue row), inside the run loop -- which fastp runs through as well as breseq -- in the gap
+between trimming and breseq (a cancel that landed during fastp's last file would otherwise start
+an hours-long breseq), and while waiting for the import lock -- that wait can be half an hour,
+and a wait nobody can give up on is the same dead end as a job nobody can stop.
+
+### Trimming is breseq's pairing rule, or it is wrong
+
+fastp trims a pair in paired-end mode, so the plugin has to decide which files are mates
+*before* breseq does -- and if the two decided differently, breseq would build read groups from
+trimmed files whose mates it never saw together. `pairing.read_file_sets` is therefore
+`cReadFileSets::Init` from breseq's `settings.cpp` transcribed, not a regex on `_R1`: same-length
+base names differing at exactly one `1`/`2`, duplicates renamed first, ambiguity meaning
+unpaired. `test_pairing.py` holds the cases. The trimmed files keep their names in `trimmed/`,
+which is what makes breseq pair them identically and what keeps a `.gz` a `.gz` (fastp decides
+compression from the output name).
+
+The options are brefito's and only brefito's -- `--disable_quality_filtering`, plus
+`--detect_adapter_for_pe` for a pair. Long-read files are sniffed (a read of 1000 bp or more in
+the first 200 records, breseq's own trigger length) and passed through untrimmed, per *set* so a
+pair is never half trimmed; so is anything not FASTQ by name. fastp failing fails the run.
 
 **`run_delete` refuses an unfinished run.** The `post_delete` receiver rmtrees the run
 directory, so deleting a running one pulls the reads out from under the live subprocess and
@@ -175,8 +194,8 @@ under it** — it cannot know what a component keeps. The `post_delete` receiver
 is the whole lifecycle, and because `BreseqRun.experiment` cascades, that receiver is also what
 makes deleting an *experiment* reach the reads and the report.
 
-After a success only `report/` survives. A **failure keeps everything**, which is exactly when
-the reads matter.
+A success deletes `reads/`, `trimmed/` and the output directory. A **failure keeps everything**,
+which is exactly when the reads matter.
 
 ---
 
@@ -213,7 +232,7 @@ cd mutint && ./mutint test mutint_breseq
 
 There is no way to run them from mutint-core: the plugin is not installed there.
 
-**59 tests**, and the end-to-end ones are affordable because of two things. The test runner
+**93 tests**, and the end-to-end ones are affordable because of two things. The test runner
 forces `django.tasks` to its immediate backend, so `.enqueue()` runs inline and one POST
 exercises launch, the subprocess, the ingest and the cleanup. And `tests/fake_breseq.py` is a
 **real executable on disk** rather than a `subprocess.run` patch — the two things most likely

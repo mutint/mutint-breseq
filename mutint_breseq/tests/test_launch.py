@@ -83,6 +83,8 @@ class LaunchTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "breseq-sample-name")
         self.assertContains(response, "breseq-arguments")
+        # Trimming is offered and on by default.
+        self.assertContains(response, 'id="breseq-trim-reads" checked')
 
     def test_without_a_reference_the_form_is_replaced_by_a_banner(self):
         from mutint_experiment.views import _create_experiment

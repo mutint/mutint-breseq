@@ -22,3 +22,8 @@
 # on PATH or breseq stops with `Required executable "bowtie2" not found`, having exited 0.
 # mutint_breseq/runner.py `tool_environment()` is what builds that PATH.
 https://barricklab.github.io/conda/::breseq-prerelease
+
+# fastp trims adapters off the reads before breseq sees them, when a run asks for it -- which
+# is the default. bioconda has it, so no channel prefix; `--detect_adapter_for_pe` has been in
+# it since 0.19, so no pin. `runner.build_fastp_argv` is the whole of how it is called.
+fastp

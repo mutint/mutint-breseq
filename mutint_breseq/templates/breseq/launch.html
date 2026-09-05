@@ -56,6 +56,19 @@
             </small>
         </div>
 
+        <div class="checkbox" style="margin-bottom: 1em;">
+            <label>
+                <input type="checkbox" id="breseq-trim-reads" checked>
+                Trim reads with fastp first
+            </label>
+            <small class="help-block" style="margin-top: 0;">
+                Adapter trimming only, with fastp's quality filtering off. Files are trimmed
+                as a pair when breseq would read them as one &mdash; two names of the same
+                length that differ only where one has a <code>1</code> and the other a
+                <code>2</code> &mdash; and files of long reads are passed to breseq untrimmed.
+            </small>
+        </div>
+
         <div id="breseq-dropzone" style="border: 2px dashed #999; border-radius: 6px;
              padding: 2.5em; text-align: center; color: #666; background: #fafafa;
              cursor: pointer;">
@@ -179,7 +192,8 @@
             parts.push("<b>Arguments</b> <code>" + esc(run.arguments) + "</code>");
         }
         if ((run.read_files || []).length) {
-            parts.push("<b>Reads</b> " + esc(run.read_files.join(", ")));
+            parts.push("<b>Reads</b> " + esc(run.read_files.join(", ")) +
+                       (run.trim_reads ? " (trimmed with fastp)" : " (untrimmed)"));
         }
         if (!parts.length) { return ""; }
         return '<tr><td colspan="5" style="border-top: 0; padding-top: 0; color: #666;">' +
@@ -190,7 +204,7 @@
         if (!run.log || run.status !== "failed") { return ""; }
         return '<tr><td colspan="5" style="border-top: 0; padding-top: 0;">' +
                '<details><summary style="cursor: pointer; color: #666;">' +
-               "<small>breseq output</small></summary>" +
+               "<small>run output</small></summary>" +
                '<pre style="max-height: 20em; overflow: auto; font-size: 11px;">' +
                esc(run.log) + "</pre></details></td></tr>";
     }
@@ -274,6 +288,7 @@
     var submitBtn = document.getElementById("breseq-submit");
     var nameInput = document.getElementById("breseq-sample-name");
     var argsInput = document.getElementById("breseq-arguments");
+    var trimInput = document.getElementById("breseq-trim-reads");
     var errorEl = document.getElementById("breseq-error");
     var progressEl = document.getElementById("breseq-progress");
     var progressBar = document.getElementById("breseq-progress-bar");
@@ -353,7 +368,8 @@
             return mutintPostJson("/breseq/launch?experiment_id=" + EXPERIMENT_ID, {
                 upload_id: uploadId,
                 sample_name: nameInput.value,
-                arguments: argsInput.value
+                arguments: argsInput.value,
+                trim_reads: trimInput.checked
             });
         }).then(function (body) {
             progressEl.style.display = "none";

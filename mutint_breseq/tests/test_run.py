@@ -23,7 +23,7 @@ from mutint_sample.models import Mutation, MutationCall, Sample
 
 from mutint_breseq import runner
 from mutint_breseq.models import STATUS_FAILED, STATUS_IMPORTED, BreseqRun
-from mutint_breseq.tests import fake_breseq
+from mutint_breseq.tests import fake_breseq, fake_fastp
 from mutint_breseq.tests.test_launch import establish_reference
 
 
@@ -43,14 +43,17 @@ class RunTestCase(TestCase):
         self.addCleanup(shutil.rmtree, self.template_root, True)
         self.template = breseq_fixture.write_sample(self.template_root, "template")
         self.argv_record = os.path.join(self.template_root, "argv.json")
+        self.fastp_record = os.path.join(self.template_root, "fastp.jsonl")
 
         fake_breseq.install(self.tools)
+        fake_fastp.install(self.tools)
         patcher = override_settings(MUTINT_STORE_DIR=self.store, MUTINT_TOOLS_DIR=self.tools)
         patcher.enable()
         self.addCleanup(patcher.disable)
 
         for name, value in (("FAKE_BRESEQ_TEMPLATE", self.template),
-                            ("FAKE_BRESEQ_ARGV", self.argv_record)):
+                            ("FAKE_BRESEQ_ARGV", self.argv_record),
+                            ("FAKE_FASTP_ARGV", self.fastp_record)):
             os.environ[name] = value
             self.addCleanup(os.environ.pop, name, None)
 
@@ -61,7 +64,7 @@ class RunTestCase(TestCase):
 
     # --- helpers ------------------------------------------------------------------------
 
-    def _stage(self, names=("s1_R1.fastq", "s1_R2.fastq")):
+    def _stage(self, names=("s1_R1.fastq", "s1_R2.fastq"), content="ACGT"):
         session = staging.open_session(
             self.owner, self.experiment, "mutint_breseq",
             [{"path": name, "size": 4} for name in names])
@@ -70,20 +73,30 @@ class RunTestCase(TestCase):
             path = os.path.join(root, name)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w") as handle:
-                handle.write("ACGT")
+                handle.write(content)
         return session
 
-    def _launch(self, sample_name="s1", arguments="", names=("s1_R1.fastq", "s1_R2.fastq")):
-        session = self._stage(names)
+    def _launch(self, sample_name="s1", arguments="", names=("s1_R1.fastq", "s1_R2.fastq"),
+                trim_reads=None, content="ACGT"):
+        session = self._stage(names, content=content)
+        body = {"upload_id": str(session.id), "sample_name": sample_name,
+                "arguments": arguments}
+        if trim_reads is not None:
+            body["trim_reads"] = trim_reads
         return self.client.post(
             "/breseq/launch?experiment_id=%s" % self.experiment.id,
-            data=json.dumps({"upload_id": str(session.id),
-                             "sample_name": sample_name, "arguments": arguments}),
-            content_type="application/json")
+            data=json.dumps(body), content_type="application/json")
 
     def _recorded_argv(self):
         with open(self.argv_record) as handle:
             return json.load(handle)
+
+    def _recorded_fastp(self):
+        """Every fastp call the run made, in order; [] when it made none."""
+        if not os.path.exists(self.fastp_record):
+            return []
+        with open(self.fastp_record) as handle:
+            return [json.loads(line) for line in handle if line.strip()]
 
     # --- the happy path -----------------------------------------------------------------
 
@@ -119,6 +132,117 @@ class RunTestCase(TestCase):
                          ["s1_R1.fastq", "s1_R2.fastq"])
         self.assertIn("-r", argv)
         self.assertTrue(argv[argv.index("-r") + 1].endswith("reference.gff3"))
+
+    # --- trimming -------------------------------------------------------------------------
+
+    def test_a_pair_is_trimmed_together_and_breseq_reads_the_trimmed_copies(self):
+        response = self._launch(names=("s1_R1.fastq", "s1_R2.fastq"))
+        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        self.assertTrue(run.trim_reads)
+
+        calls = self._recorded_fastp()
+        self.assertEqual(1, len(calls), "one pair is one fastp call")
+        fastp = calls[0]["argv"]
+        self.assertIn("--disable_quality_filtering", fastp)
+        self.assertIn("--detect_adapter_for_pe", fastp)
+        self.assertEqual("s1_R1.fastq", os.path.basename(fastp[fastp.index("-i") + 1]))
+        self.assertEqual("s1_R2.fastq", os.path.basename(fastp[fastp.index("-I") + 1]))
+        # Same names, different directory: what keeps breseq pairing them and a .gz a .gz.
+        self.assertEqual(os.path.join(run.trimmed_dir(), "s1_R1.fastq"),
+                         fastp[fastp.index("-o") + 1])
+        self.assertEqual(os.path.join(run.trimmed_dir(), "s1_R2.fastq"),
+                         fastp[fastp.index("-O") + 1])
+        # fastp shells out to nothing, but it must find the same environment breseq does.
+        self.assertTrue(calls[0]["path"].startswith(os.path.join(self.tools, "bin")))
+
+        breseq = self._recorded_argv()["argv"]
+        self.assertEqual([os.path.join(run.trimmed_dir(), "s1_R1.fastq"),
+                          os.path.join(run.trimmed_dir(), "s1_R2.fastq")], breseq[-2:])
+        self.assertEqual(run.status, STATUS_IMPORTED, run.error)
+        self.assertIn("total reads", run.log, "fastp's own summary reaches the log")
+
+    def test_a_lone_file_is_trimmed_single_end(self):
+        self._launch(names=("lane.fastq.gz",))
+        fastp = self._recorded_fastp()[0]["argv"]
+        self.assertIn("-i", fastp)
+        self.assertNotIn("-I", fastp)
+        self.assertNotIn("--detect_adapter_for_pe", fastp)
+
+    def test_two_files_breseq_would_not_pair_are_trimmed_apart(self):
+        # a1_R1 has two possible mates, so breseq leaves all three unpaired -- and so must this,
+        # or breseq would meet trimmed files whose mates were decided differently.
+        self._launch(names=("a1_R1.fastq", "a1_R2.fastq", "a2_R1.fastq"))
+        calls = self._recorded_fastp()
+        self.assertEqual(3, len(calls))
+        for call in calls:
+            self.assertNotIn("-I", call["argv"])
+
+    def test_no_paired_mapping_in_the_box_trims_every_file_alone(self):
+        self._launch(arguments="--no-paired-mapping")
+        calls = self._recorded_fastp()
+        self.assertEqual(2, len(calls))
+        for call in calls:
+            self.assertNotIn("--detect_adapter_for_pe", call["argv"])
+
+    def test_trimming_can_be_switched_off(self):
+        response = self._launch(trim_reads=False)
+        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        self.assertFalse(run.trim_reads)
+        self.assertEqual([], self._recorded_fastp())
+        breseq = self._recorded_argv()["argv"]
+        self.assertEqual(run.reads_dir(), os.path.dirname(breseq[-1]))
+        self.assertEqual(run.status, STATUS_IMPORTED, run.error)
+
+    def test_long_reads_are_passed_to_breseq_untrimmed(self):
+        # Sniffed from the file itself, at breseq's own trigger length, because there is no
+        # flag that says "nanopore" -- breseq detects it by length too.
+        long_read = "@r\n%s\n+\n%s\n" % ("A" * 1200, "I" * 1200)
+        response = self._launch(names=("ont.fastq",), content=long_read)
+        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        self.assertEqual([], self._recorded_fastp())
+        self.assertEqual(run.reads_dir(), os.path.dirname(self._recorded_argv()["argv"][-1]))
+        self.assertIn("left ont.fastq untrimmed", run.log)
+        self.assertIn("long reads", run.log)
+        self.assertEqual(run.status, STATUS_IMPORTED, run.error)
+
+    def test_a_file_that_is_not_fastq_is_passed_through(self):
+        self._launch(names=("aligned.sam",), arguments="--aligned-sam")
+        self.assertEqual([], self._recorded_fastp())
+        run = BreseqRun.objects.get()
+        self.assertIn("not a FASTQ", run.log)
+        self.assertEqual("aligned.sam", os.path.basename(self._recorded_argv()["argv"][-1]))
+
+    def test_fastp_failing_fails_the_run_and_keeps_the_directory(self):
+        os.environ["FAKE_FASTP_FAIL"] = "2"
+        self.addCleanup(os.environ.pop, "FAKE_FASTP_FAIL", None)
+        self.assertEqual(self._launch().status_code, 200)
+
+        run = BreseqRun.objects.get()
+        self.assertEqual(run.status, STATUS_FAILED)
+        self.assertIn("fastp exited 2", run.error)
+        self.assertIn("adapter detection failed", run.log)
+        self.assertTrue(os.path.isdir(run.reads_dir()))
+        # breseq was never started: nothing recorded an argv.
+        self.assertFalse(os.path.exists(self.argv_record))
+
+    def test_a_missing_fastp_says_what_installs_it(self):
+        os.remove(os.path.join(self.tools, "bin", "fastp"))
+        with mock.patch.dict(os.environ, {"PATH": ""}):
+            self.assertEqual(self._launch().status_code, 200)
+        run = BreseqRun.objects.get()
+        self.assertEqual(run.status, STATUS_FAILED)
+        self.assertIn("fastp is not installed", run.error)
+
+    def test_the_trimmed_copies_go_with_the_rest_after_import(self):
+        response = self._launch()
+        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        self.assertEqual(run.status, STATUS_IMPORTED, run.error)
+        self.assertFalse(os.path.exists(run.trimmed_dir()), "the trimmed reads were kept")
+
+    def test_the_run_list_says_whether_the_reads_were_trimmed(self):
+        self._launch(trim_reads=False)
+        rows = self.client.get("/breseq/runs?experiment_id=%s" % self.experiment.id).json()
+        self.assertFalse(rows["runs"][0]["trim_reads"])
 
     def test_typed_arguments_reach_breseq(self):
         self._launch(arguments="-p --polymorphism-minimum-variant-coverage 4")

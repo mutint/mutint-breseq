@@ -13,6 +13,7 @@ import signal
 import subprocess
 import tempfile
 import time
+from unittest import mock
 
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
@@ -25,7 +26,7 @@ from mutint_jobs import jobs as jobs_api
 
 from mutint_breseq import runner, tasks
 from mutint_breseq.models import STATUS_CANCELLED, BreseqRun
-from mutint_breseq.tests import fake_breseq
+from mutint_breseq.tests import fake_breseq, fake_fastp
 from mutint_breseq.tests.test_launch import establish_reference
 
 
@@ -166,6 +167,7 @@ class CancelledRunTestCase(TestCase):
         self.template = breseq_fixture.write_sample(self.template_root, "template")
 
         fake_breseq.install(self.tools)
+        fake_fastp.install(self.tools)
         patcher = override_settings(MUTINT_STORE_DIR=self.store, MUTINT_TOOLS_DIR=self.tools)
         patcher.enable()
         self.addCleanup(patcher.disable)
@@ -249,6 +251,33 @@ class CancelledRunTestCase(TestCase):
         self.assertTrue(row["cancel_requested"])
         # Asked once is enough; a second button would suggest the first had not worked.
         self.assertFalse(row["cancellable"])
+
+    def test_a_cancel_during_trimming_stops_fastp_and_never_starts_breseq(self):
+        """The fastp stage polls through the same loop breseq does, and the gap after it polls
+        once more -- so a cancel that lands mid-trim ends the run there."""
+        pids_file = os.path.join(self.template_root, "fastp_pids.json")
+        os.environ["FAKE_FASTP_SLEEP"] = "1"
+        os.environ["FAKE_FASTP_PIDS"] = pids_file
+        self.addCleanup(os.environ.pop, "FAKE_FASTP_SLEEP", None)
+        self.addCleanup(os.environ.pop, "FAKE_FASTP_PIDS", None)
+
+        self._launch()
+        run = BreseqRun.objects.get()
+        # Not cancelled at entry; cancelled at every poll after it. The first poll is the one
+        # inside the fastp loop, two seconds in.
+        with mock.patch.object(tasks.jobs, "is_cancelled", side_effect=[False] + [True] * 50):
+            self.assertIsNone(tasks.run_breseq.call(run.pk))
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, STATUS_CANCELLED)
+        with open(pids_file) as handle:
+            pids = json.load(handle)
+        self.assertTrue(wait_until_gone(pids["parent"]))
+        self.assertTrue(wait_until_gone(pids["child"]), "fastp's child outlived the cancel")
+        self.assertFalse(os.path.exists(run.trimmed_dir()))
+        self.assertFalse(os.path.exists(run.reads_dir()))
+        self.assertFalse(os.path.exists(os.path.join(self.template_root, "argv.json")),
+                         "breseq was started after the cancel")
 
     def test_a_cancelled_run_can_then_be_deleted(self):
         self._launch()

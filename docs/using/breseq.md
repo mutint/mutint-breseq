@@ -33,7 +33,8 @@ breseq, and every run fails identically.
 
 1. Open **Run breseq** with an experiment selected.
 2. Type a **sample name**. This is what the sample is called everywhere in MutInt.
-3. Optionally type **breseq arguments**.
+3. Optionally type **breseq arguments**, and untick **Trim reads with fastp first** if you do
+   not want the reads trimmed.
 4. Drop the sample's read files, and press **Run breseq**.
 
 Everything you drop is one sample's reads — both mates of a pair, or several lanes. To analyze
@@ -72,6 +73,27 @@ Common ones:
 breseq's own documentation lists the rest. Nothing is passed through a shell, so quoting works
 the way it does in a terminal and nothing else in the box can have any other effect.
 
+### Trimming
+
+By default the reads are run through [fastp](https://github.com/OpenGene/fastp) before breseq
+sees them. It trims adapters and nothing else: quality filtering is off, because it has been
+seen to gut older data sets, and no length filter or deduplication is applied. What breseq
+receives is the same files under the same names, adapter-free.
+
+**Pairs are trimmed as pairs.** Two files are mates when breseq would read them as mates, and
+breseq's rule is simple: their names are the same length and differ in exactly one place, where
+one has a `1` and the other a `2`. `sample_R1.fastq.gz` and `sample_R2.fastq.gz` qualify, so do
+`lane_1.fq` and `lane_2.fq`, and a file that could be paired two ways is treated as unpaired --
+exactly as breseq treats it. A pair is trimmed with fastp's paired-end adapter detection.
+
+**Long reads are left alone.** A file whose first reads include one of 1000 bases or more --
+breseq's own threshold for a long-read file -- is passed to breseq untrimmed, and the run log
+says so. Files that are not FASTQ by name, such as aligned SAM under `--aligned-sam`, pass
+through as well. Compression is untouched: a gzipped file comes out gzipped.
+
+If fastp fails the run fails, with fastp's output in the log, rather than quietly running breseq
+on the untrimmed reads. Untick the box to skip trimming altogether.
+
 ## Watching it
 
 The run list under the form updates itself while anything is in flight:
@@ -105,8 +127,8 @@ followed would name neither the cause nor the person who caused it.
 
 ## What is kept
 
-After a successful import, **the run directory is emptied** — the reads and breseq's working
-data go, and breseq's HTML report has already been stored under the sample. That is not a loss: the mutations, the alignment and the
+After a successful import, **the run directory is emptied** — the reads, the trimmed copies and
+breseq's working data go, and breseq's HTML report has already been stored under the sample. That is not a loss: the mutations, the alignment and the
 reference are all in the store under the sample by then, which is what the mutation tables and
 the genome browser read.
 

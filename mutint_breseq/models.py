@@ -72,6 +72,10 @@ class BreseqRun(models.Model):
     sample_name = models.CharField(max_length=200)
     # The one box, verbatim as typed. Split with shlex at run time, never handed to a shell.
     arguments = models.TextField(blank=True)
+    # Whether fastp trimmed the reads before breseq saw them. On by default; recorded per run
+    # rather than read from a setting so a row says what was actually done to its reads.
+    # Runs from before the option existed carry False, which is the truth about them.
+    trim_reads = models.BooleanField(default=True)
     # The basenames dropped, so the run list can say what it was given after the reads are
     # deleted. Not paths: nothing resolves these, they are for a person to read.
     read_files = models.JSONField(default=list)
@@ -114,6 +118,10 @@ class BreseqRun(models.Model):
 
     def reads_dir(self):
         return os.path.join(self.directory(), "reads")
+
+    def trimmed_dir(self):
+        """Where fastp writes. Same file names as `reads/`, so breseq pairs them identically."""
+        return os.path.join(self.directory(), "trimmed")
 
     def output_dir(self):
         """breseq's ``-o``. **Named for the sample**, which is not decoration.

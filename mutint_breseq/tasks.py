@@ -73,22 +73,80 @@ def _cancelled(run, log=None):
     run.error = ""
     run.finished_at = timezone.now()
     if log is not None:
-        run.log = run.truncated_log(log)
+        run.log = log
     run.save(update_fields=["status", "error", "finished_at", "log"])
 
     shutil.rmtree(run.reads_dir(), ignore_errors=True)
+    shutil.rmtree(run.trimmed_dir(), ignore_errors=True)
     shutil.rmtree(run.output_dir(), ignore_errors=True)
     logger.info("breseq run %s cancelled", run.pk)
 
 
 def _fail(run, message, log=None):
-    """Record why, keep the directory, and hand the exception on."""
+    """Record why, keep the directory, and hand the exception on.
+
+    `log` is stored as given: callers pass `_log_text`'s answer, already cut to size.
+    """
     run.status = STATUS_FAILED
     run.error = message
     run.finished_at = timezone.now()
     if log is not None:
-        run.log = run.truncated_log(log)
+        run.log = log
     run.save(update_fields=["status", "error", "finished_at", "log"])
+
+
+def _log_text(run, parts, output):
+    """One log: fastp's account, then breseq's, cut to size.
+
+    breseq's output alone is what gets truncated -- it is the long one, and cutting the joined
+    text from the front would discard fastp's few lines first, every time, which is what
+    happened the first time this ran for real.
+    """
+    return "\n".join(list(parts) + [run.truncated_log(output)])
+
+
+class _FastpFailed(Exception):
+    """fastp exited nonzero. Carries everything the stage had said so far."""
+
+    def __init__(self, message, log):
+        super().__init__(message)
+        self.log = log
+
+
+def _trim_reads(run, fastp, reads, paired, deadline):
+    """Run fastp over the reads, set by set. Returns (what breseq should read, the log).
+
+    The sets are breseq's own -- see `pairing.py` -- so a pair is trimmed as a pair and the
+    trimmed files, keeping their names, pair again when breseq sees them. Sets fastp should
+    not touch are passed through as the original path, and the log says so.
+
+    Raises `runner.Cancelled`, `subprocess.TimeoutExpired`, `OSError` as the breseq stage
+    does, and `_FastpFailed` for a nonzero exit.
+    """
+    out_dir = store.ensure_dir(run.trimmed_dir())
+    env = runner.tool_environment()
+    replacement = {}
+    lines = []
+    for plan in runner.plan_trimming(reads, paired=paired):
+        names = ", ".join(os.path.basename(path) for path in plan.read_set.files)
+        if not plan.trim:
+            lines.append("fastp: left %s untrimmed (%s)" % (names, plan.reason))
+            continue
+        argv = runner.build_fastp_argv(fastp, plan.read_set, out_dir,
+                                       threads=runner.fastp_threads())
+        logger.info("breseq run %s trimming: %s", run.pk, " ".join(argv))
+        lines.append("$ " + " ".join(argv))
+        returncode, output = runner.run_breseq_process(
+            argv, env, max(1, deadline - time.monotonic()),
+            is_cancelled=lambda: jobs.is_cancelled(run.task_result_id), what="fastp")
+        lines.append(output)
+        if returncode != 0:
+            raise _FastpFailed(
+                "fastp exited %d on %s. Its output is below; the run directory has been kept."
+                % (returncode, names), run.truncated_log("\n".join(lines)))
+        for path in plan.read_set.files:
+            replacement[path] = runner.trimmed_path(out_dir, path)
+    return [replacement.get(path, path) for path in reads], "\n".join(lines)
 
 
 def _wait_for_import_lock(holder, task_result_id=None):
@@ -158,13 +216,47 @@ def run_breseq(run_id):
 
     reads = sorted(
         os.path.join(run.reads_dir(), name) for name in os.listdir(run.reads_dir()))
+    # One budget for the whole run. fastp is minutes against breseq's hours, so it is not
+    # given a clock of its own; what it uses comes off what breseq is then allowed.
+    deadline = time.monotonic() + _timeout()
+    log_parts = []
+
+    if run.trim_reads:
+        try:
+            fastp = runner.fastp_path()
+        except ToolMissing as missing:
+            _fail(run, str(missing))
+            raise
+        # `--no-paired-mapping` makes breseq treat every file as its own set, so fastp must too.
+        paired = "--no-paired-mapping" not in runner.split_arguments(run.arguments)
+        try:
+            reads, trim_log = _trim_reads(run, fastp, reads, paired, deadline)
+        except runner.Cancelled:
+            _cancelled(run)
+            return None
+        except subprocess.TimeoutExpired:
+            _fail(run, "fastp did not finish within %d seconds." % _timeout())
+            raise
+        except OSError as exc:
+            _fail(run, "fastp could not be started: %s" % exc)
+            raise
+        except _FastpFailed as failed:
+            _fail(run, str(failed), log=failed.log)
+            raise RuntimeError("fastp failed for run %s: %s" % (run.pk, failed))
+        log_parts.append(trim_log)
+        # The fourth place that polls. A cancel that landed while fastp ran its last file would
+        # otherwise start an hours-long breseq that nobody wants.
+        if jobs.is_cancelled(run.task_result_id):
+            _cancelled(run)
+            return None
+
     argv = runner.build_argv(breseq, run.output_dir(), reference, run.arguments, reads,
                              processors=runner.default_processors())
     logger.info("breseq run %s starting: %s", run.pk, " ".join(argv))
 
     try:
         returncode, output = runner.run_breseq_process(
-            argv, runner.tool_environment(), _timeout(),
+            argv, runner.tool_environment(), max(1, deadline - time.monotonic()),
             is_cancelled=lambda: jobs.is_cancelled(run.task_result_id))
     except runner.Cancelled:
         # The process and its whole group are already gone by here; `run_breseq_process`
@@ -180,7 +272,9 @@ def run_breseq(run_id):
         _fail(run, "breseq could not be started: %s" % exc)
         raise
 
-    run.log = run.truncated_log(output)
+    # fastp's account first, then breseq's: one log, in the order things happened.
+    output = _log_text(run, log_parts, output)
+    run.log = output
     run.save(update_fields=["log"])
 
     if returncode != 0:

@@ -12,10 +12,23 @@ import shutil
 import signal
 import subprocess
 import time
+from collections import namedtuple
 
 from mutint_common import tools
 
+from mutint_breseq import pairing
+
 BRESEQ = "breseq"
+FASTP = "fastp"
+
+# brefito's fastp settings, and only those. `--disable_quality_filtering` because quality
+# trimming was found there to gut old Solexa data sets; adapter trimming is fastp's default and
+# is the whole point. A pair also gets `--detect_adapter_for_pe`, which reads the adapter off
+# the overlap between mates rather than guessing it from one side.
+FASTP_OPTIONS = ("--disable_quality_filtering",)
+FASTP_PAIRED_OPTIONS = ("--detect_adapter_for_pe",)
+# fastp refuses more than this.
+FASTP_MAX_THREADS = 16
 
 # How often the run loop asks whether somebody has cancelled. One indexed read against a
 # unique column, against a subprocess measured in hours -- the interval is about how long a
@@ -119,9 +132,70 @@ def breseq_path():
     return tools.require(BRESEQ)
 
 
+def fastp_path():
+    """Absolute path to fastp, or ToolMissing naming what installs it."""
+    return tools.require(FASTP)
+
+
+def fastp_threads():
+    """As many as breseq gets, capped where fastp caps itself."""
+    count = default_processors()
+    return min(count, FASTP_MAX_THREADS) if count else None
+
+
+def trimmed_path(out_dir, read):
+    """Where a read file's trimmed copy goes: same name, different directory.
+
+    The name is what breseq pairs on and names read groups from, and it is also how fastp
+    decides whether to write gzip -- so keeping it is what keeps a `.gz` a `.gz` and a pair a
+    pair.
+    """
+    return os.path.join(out_dir, os.path.basename(read))
+
+
+def build_fastp_argv(fastp, read_set, out_dir, threads=None):
+    """fastp's command line for one read file set, single or paired."""
+    argv = [fastp] + list(FASTP_OPTIONS)
+    if threads:
+        argv += ["--thread", str(threads)]
+    argv += ["-j", os.path.join(out_dir, read_set.name + ".fastp.json"),
+             "-h", os.path.join(out_dir, read_set.name + ".fastp.html")]
+    first = read_set.files[0]
+    argv += ["-i", first, "-o", trimmed_path(out_dir, first)]
+    if len(read_set.files) == 2:
+        second = read_set.files[1]
+        argv += list(FASTP_PAIRED_OPTIONS)
+        argv += ["-I", second, "-O", trimmed_path(out_dir, second)]
+    return argv
+
+
+# One read file set and whether fastp should see it. `reason` says why not, for the run log.
+TrimPlan = namedtuple("TrimPlan", ["read_set", "trim", "reason"])
+
+
+def plan_trimming(reads, paired=True):
+    """Which of `reads` fastp trims, grouped the way breseq will group them.
+
+    A set is left alone when any file in it is not FASTQ by name -- aligned SAM, say -- or
+    holds long reads, which fastp's Illumina adapter model has no business touching. The
+    decision is per set rather than per file so a pair is never half trimmed.
+    """
+    plans = []
+    for read_set in pairing.read_file_sets(reads, paired=paired):
+        if not all(pairing.is_fastq(path) for path in read_set.files):
+            plans.append(TrimPlan(read_set, False, "not a FASTQ file"))
+        elif any(pairing.looks_long_read(path) for path in read_set.files):
+            plans.append(TrimPlan(read_set, False, "long reads, %d bp or more"
+                                  % pairing.LONG_READ_TRIGGER_LENGTH))
+        else:
+            plans.append(TrimPlan(read_set, True, ""))
+    return plans
+
+
 def run_breseq_process(argv, env, timeout, is_cancelled=None,
-                       poll_seconds=CANCEL_POLL_SECONDS):
-    """Run breseq, watching for cancellation. Returns (returncode, combined output).
+                       poll_seconds=CANCEL_POLL_SECONDS, what=BRESEQ):
+    """Run breseq -- or fastp, which runs through here too -- watching for cancellation.
+    Returns (returncode, combined output).
 
     `subprocess.run` cannot do this: it blocks until the process exits, so there is no moment
     at which anything could be asked whether the job is still wanted. The loop is the whole
@@ -152,7 +226,7 @@ def run_breseq_process(argv, env, timeout, is_cancelled=None,
 
             if is_cancelled is not None and is_cancelled():
                 _stop(process)
-                raise Cancelled("breseq was cancelled.")
+                raise Cancelled("%s was cancelled." % what)
 
             if time.monotonic() >= deadline:
                 _stop(process)
@@ -211,4 +285,5 @@ def cleanup_after_import(run_dir, output_dir):
     than trusting that.
     """
     shutil.rmtree(os.path.join(run_dir, "reads"), ignore_errors=True)
+    shutil.rmtree(os.path.join(run_dir, "trimmed"), ignore_errors=True)
     shutil.rmtree(output_dir, ignore_errors=True)

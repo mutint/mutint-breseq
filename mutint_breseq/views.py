@@ -119,6 +119,7 @@ def _run_rows(experiment):
             "sample_name": run.sample_name,
             "arguments": run.arguments,
             "read_files": run.read_files,
+            "trim_reads": run.trim_reads,
             "status": run.status,
             "queue_status": _queue_status(run),
             "created_at": run.created_at.isoformat(),
@@ -149,7 +150,9 @@ def runs(request):
 
 @require_POST
 def launch(request):
-    """Take a staged drop and start a run. Body: {upload_id, sample_name, arguments}.
+    """Take a staged drop and start a run.
+
+    Body: {upload_id, sample_name, arguments, trim_reads}; `trim_reads` defaults to true.
 
     Gated on `can_edit_experiment` and **not** `can_edit_project`: what this eventually writes
     is a sample everybody sees, so a locked experiment has to refuse it, and a predicate handed
@@ -212,6 +215,7 @@ def launch(request):
         created_by=request.user if request.user.is_authenticated else None,
         sample_name=sample_name,
         arguments=arguments,
+        trim_reads=bool(payload.get("trim_reads", True)),
         status=STATUS_QUEUED)
 
     try:
