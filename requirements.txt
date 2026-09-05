@@ -1,8 +1,8 @@
-# Install aledb-core dependencies first:
-#   pip install -r aledb-core/requirements.txt
+# Install mutint-core dependencies first:
+#   pip install -r mutint-core/requirements.txt
 #
 # mutint-breseq-specific additions (if any):
 #
 # None. The plugin shells out to breseq (see tools.txt) and stores what it needs in one
-# model; the run itself is `subprocess.run` and the ingest is aledb-core's own
-# `aledb_import.breseq_folder`, so nothing here is new to the venv.
+# model; the run itself is `subprocess.run` and the ingest is mutint-core's own
+# `mutint_import.breseq_folder`, so nothing here is new to the venv.

@@ -13,10 +13,10 @@ import tempfile
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 
-from aledb_common import store
-from aledb_experiment.models import Experiment, Project
-from aledb_import import reference, reference_store, staging
-from aledb_import.tests import breseq_fixture
+from mutint_common import store
+from mutint_experiment.models import Experiment, Project
+from mutint_import import reference, reference_store, staging
+from mutint_import.tests import breseq_fixture
 
 from mutint_breseq.models import (
     STATUS_IMPORTED, STATUS_RUNNING, BreseqRun,
@@ -47,12 +47,12 @@ class LaunchTestCase(TestCase):
 
         self.store = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.store, True)
-        patcher = override_settings(ALEDB_STORE_DIR=self.store)
+        patcher = override_settings(MUTINT_STORE_DIR=self.store)
         patcher.enable()
         self.addCleanup(patcher.disable)
 
         self.project = Project.objects.create(name="p", user=self.owner)
-        from aledb_experiment.views import _create_experiment
+        from mutint_experiment.views import _create_experiment
         self.experiment = _create_experiment(self.project, "e", self.owner)
         establish_reference(self.experiment)
 
@@ -85,7 +85,7 @@ class LaunchTestCase(TestCase):
         self.assertContains(response, "breseq-arguments")
 
     def test_without_a_reference_the_form_is_replaced_by_a_banner(self):
-        from aledb_experiment.views import _create_experiment
+        from mutint_experiment.views import _create_experiment
         bare = _create_experiment(self.project, "bare", self.owner)
         response = self.client.get("/breseq/?experiment_id=%s" % bare.id)
         self.assertEqual(response.status_code, 200)
@@ -95,7 +95,7 @@ class LaunchTestCase(TestCase):
 
     def test_a_reader_gets_the_run_list_and_no_form(self):
         reader = User.objects.create(username="reader", email="r@e.com", is_active=True)
-        from aledb_experiment.permissions import grant_project_access
+        from mutint_experiment.permissions import grant_project_access
         grant_project_access(self.project, reader, "read")
         self.client.force_login(reader)
         response = self.client.get("/breseq/?experiment_id=%s" % self.experiment.id)
@@ -107,7 +107,7 @@ class LaunchTestCase(TestCase):
     def test_a_reader_cannot_launch(self):
         session = self._stage()
         reader = User.objects.create(username="reader", email="r@e.com", is_active=True)
-        from aledb_experiment.permissions import grant_project_access
+        from mutint_experiment.permissions import grant_project_access
         grant_project_access(self.project, reader, "read")
         self.client.force_login(reader)
         # 403 from session_for -- the session is somebody else's -- or from the permission
@@ -125,7 +125,7 @@ class LaunchTestCase(TestCase):
         self.assertEqual(BreseqRun.objects.count(), 0)
 
     def test_an_experiment_with_no_reference_refuses(self):
-        from aledb_experiment.views import _create_experiment
+        from mutint_experiment.views import _create_experiment
         bare = _create_experiment(self.project, "bare", self.owner)
         session = self._stage(experiment=bare)
         response = self._launch(session.id, experiment_id=bare.id)
@@ -156,7 +156,7 @@ class LaunchTestCase(TestCase):
 
     def test_another_experiments_upload_is_refused(self):
         # Two ids arrive from the client and nothing else pairs them.
-        from aledb_experiment.views import _create_experiment
+        from mutint_experiment.views import _create_experiment
         other = _create_experiment(self.project, "other", self.owner)
         establish_reference(other)
         session = self._stage(experiment=other)
@@ -197,15 +197,15 @@ class RunListTestCase(TestCase):
         self.client.force_login(self.owner)
         self.store = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.store, True)
-        patcher = override_settings(ALEDB_STORE_DIR=self.store)
+        patcher = override_settings(MUTINT_STORE_DIR=self.store)
         patcher.enable()
         self.addCleanup(patcher.disable)
         self.project = Project.objects.create(name="p", user=self.owner)
-        from aledb_experiment.views import _create_experiment
+        from mutint_experiment.views import _create_experiment
         self.experiment = _create_experiment(self.project, "e", self.owner)
 
     def test_the_list_is_scoped_to_the_experiment(self):
-        from aledb_experiment.views import _create_experiment
+        from mutint_experiment.views import _create_experiment
         other = _create_experiment(self.project, "other", self.owner)
         BreseqRun.objects.create(experiment=self.experiment, sample_name="mine")
         BreseqRun.objects.create(experiment=other, sample_name="theirs")
@@ -250,7 +250,7 @@ class RunListTestCase(TestCase):
         run = BreseqRun.objects.create(experiment=self.experiment, sample_name="s1",
                                        status=STATUS_IMPORTED)
         reader = User.objects.create(username="reader", email="r@e.com", is_active=True)
-        from aledb_experiment.permissions import grant_project_access
+        from mutint_experiment.permissions import grant_project_access
         grant_project_access(self.project, reader, "read")
         self.client.force_login(reader)
         self.assertEqual(

@@ -5,7 +5,7 @@ coverage derivation was enqueued because 900 seconds is rude, and this is *hours
 shape of work a queue exists for at all.
 
 **The argument is a primary key, not a model** -- `django.tasks` serializes arguments as JSON,
-the same contract `aledb_import.tasks.build_coverage` states. And like that task this one
+the same contract `mutint_import.tasks.build_coverage` states. And like that task this one
 **re-raises** after recording the failure, rather than swallowing it: the row is what a person
 reads and the queue's own record is what says a worker tried and could not, and the two failure
 stories are different. A task that returned quietly on error would leave `db_worker` reporting
@@ -13,7 +13,7 @@ a clean run of a job that did nothing.
 
 **Nothing runs inside a transaction here.** The breseq call is hours long and the ingest opens
 its own per-sample transactions, so wrapping either would hold a connection open across the
-whole run for no gain -- and `aledb_import.breseq_folder` already gives each sample its own,
+whole run for no gain -- and `mutint_import.breseq_folder` already gives each sample its own,
 which is what makes a failed one roll back on its own.
 """
 
@@ -27,11 +27,11 @@ from django.conf import settings
 from django.tasks import task
 from django.utils import timezone
 
-from aledb_common import store
-from aledb_common.tools import ToolMissing
-from aledb_import import breseq_folder, import_lock
-from aledb_import.import_lock import ImportInProgress
-from aledb_jobs import jobs
+from mutint_common import store
+from mutint_common.tools import ToolMissing
+from mutint_import import breseq_folder, import_lock
+from mutint_import.import_lock import ImportInProgress
+from mutint_jobs import jobs
 
 from mutint_breseq import runner
 from mutint_breseq.models import (
@@ -151,7 +151,7 @@ def run_breseq(run_id):
         breseq = runner.breseq_path()
     except ToolMissing as missing:
         # The likeliest failure of all, and the reason this task does not swallow errors: a
-        # db_worker started outside ./mutint has no ALEDB_TOOLS_DIR, so it finds no breseq and
+        # db_worker started outside ./mutint has no MUTINT_TOOLS_DIR, so it finds no breseq and
         # would otherwise fail every run with nothing saying why.
         _fail(run, str(missing))
         raise
@@ -206,7 +206,7 @@ def run_breseq(run_id):
         # The run directory holds exactly one sample folder, named for the sample, so
         # `find_sample_dirs` finds that one and takes its name from the basename -- which is
         # why nothing here passes a sample name. One rule about what a sample is called, and
-        # it is aledb-core's.
+        # it is mutint-core's.
         # `user=` so the coverage job core enqueues from inside that import is attributed to
         # whoever launched this run, and appears on their /jobs/ page rather than only in the
         # superuser-only unattributed list. It is the one thing this call contributes beyond
@@ -252,7 +252,7 @@ def _imported_sample(experiment, sample_name):
     None is a real answer and not a failure: the run imported, and what is missing is the link
     on the page -- a sample renamed by hand between the import and this line, say.
     """
-    from aledb_sample.models import Sample
+    from mutint_sample.models import Sample
 
     return Sample.objects.filter(
         population__experiment=experiment,

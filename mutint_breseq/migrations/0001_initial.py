@@ -10,8 +10,8 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
-        ('aledb_experiment', '0002_initial'),
-        ('aledb_sample', '0001_initial'),
+        ('mutint_experiment', '0002_initial'),
+        ('mutint_sample', '0001_initial'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
@@ -32,8 +32,8 @@ class Migration(migrations.Migration):
                 ('error', models.TextField(blank=True)),
                 ('report_stored', models.BooleanField(default=False)),
                 ('created_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, to=settings.AUTH_USER_MODEL)),
-                ('experiment', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='breseq_runs', to='aledb_experiment.experiment')),
-                ('sample', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='breseq_runs', to='aledb_sample.sample')),
+                ('experiment', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='breseq_runs', to='mutint_experiment.experiment')),
+                ('sample', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='breseq_runs', to='mutint_sample.sample')),
             ],
             options={
                 'ordering': ['-created_at'],

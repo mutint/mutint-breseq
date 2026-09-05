@@ -1,6 +1,6 @@
 """The whole path: drop reads, run breseq, import what it made.
 
-`aledb_common.test_runner` forces `django.tasks` to its immediate backend, so `.enqueue()`
+`mutint_common.test_runner` forces `django.tasks` to its immediate backend, so `.enqueue()`
 runs inline and one POST exercises launch, the subprocess, the ingest and the cleanup. That is
 what makes an end-to-end test of an hours-long feature affordable -- with `fake_breseq` in
 place of breseq itself, which is the only piece this repo is not responsible for.
@@ -15,11 +15,11 @@ from unittest import mock
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 
-from aledb_common import store
-from aledb_experiment.models import Project
-from aledb_import import staging
-from aledb_import.tests import breseq_fixture
-from aledb_sample.models import Mutation, MutationCall, Sample
+from mutint_common import store
+from mutint_experiment.models import Project
+from mutint_import import staging
+from mutint_import.tests import breseq_fixture
+from mutint_sample.models import Mutation, MutationCall, Sample
 
 from mutint_breseq import runner
 from mutint_breseq.models import STATUS_FAILED, STATUS_IMPORTED, BreseqRun
@@ -38,14 +38,14 @@ class RunTestCase(TestCase):
         self.addCleanup(shutil.rmtree, self.tools, True)
 
         # What the fake copies into -o: a sample folder in exactly the shape
-        # aledb_import.breseq_folder requires, built by core's own fixture.
+        # mutint_import.breseq_folder requires, built by core's own fixture.
         self.template_root = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.template_root, True)
         self.template = breseq_fixture.write_sample(self.template_root, "template")
         self.argv_record = os.path.join(self.template_root, "argv.json")
 
         fake_breseq.install(self.tools)
-        patcher = override_settings(ALEDB_STORE_DIR=self.store, ALEDB_TOOLS_DIR=self.tools)
+        patcher = override_settings(MUTINT_STORE_DIR=self.store, MUTINT_TOOLS_DIR=self.tools)
         patcher.enable()
         self.addCleanup(patcher.disable)
 
@@ -55,7 +55,7 @@ class RunTestCase(TestCase):
             self.addCleanup(os.environ.pop, name, None)
 
         self.project = Project.objects.create(name="p", user=self.owner)
-        from aledb_experiment.views import _create_experiment
+        from mutint_experiment.views import _create_experiment
         self.experiment = _create_experiment(self.project, "e", self.owner)
         establish_reference(self.experiment)
 
@@ -136,7 +136,7 @@ class RunTestCase(TestCase):
     def test_the_run_directory_is_emptied_and_the_report_is_on_the_sample(self):
         """The report belongs to the sample, not to the run that produced it.
 
-        aledb-core's importer stores breseq's `output/` under the sample's own primary key,
+        mutint-core's importer stores breseq's `output/` under the sample's own primary key,
         so nothing is left here -- and the report outlives this row, which is the point.
         """
         response = self._launch()
@@ -145,7 +145,7 @@ class RunTestCase(TestCase):
         self.assertFalse(os.path.exists(run.reads_dir()), "the reads were kept")
         self.assertFalse(os.path.exists(run.output_dir()), "breseq's output was kept")
 
-        from aledb_common import store as core_store
+        from mutint_common import store as core_store
         self.assertTrue(run.sample.report_stored)
         self.assertTrue(os.path.isfile(
             os.path.join(core_store.sample_report_dir(run.sample_id), "index.html")))
@@ -173,9 +173,9 @@ class RunTestCase(TestCase):
         """No route of our own any more.
 
         The plugin used to serve the report itself at /breseq/run/<pk>/report/<path>. That is
-        gone: aledb-core keeps it under the sample and serves it sandboxed, and this links
+        gone: mutint-core keeps it under the sample and serves it sandboxed, and this links
         there. Containment and the sandbox are tested where they live, in
-        `aledb_sample/tests/test_report.py`.
+        `mutint_sample/tests/test_report.py`.
         """
         response = self._launch()
         run = BreseqRun.objects.get(pk=response.json()["run_id"])
@@ -226,12 +226,12 @@ class RunTestCase(TestCase):
 
     def test_a_missing_breseq_says_what_installs_it(self):
         # The likeliest failure in production: a db_worker started outside ./mutint has no
-        # ALEDB_TOOLS_DIR, so it finds no breseq and every run fails the same way.
+        # MUTINT_TOOLS_DIR, so it finds no breseq and every run fails the same way.
         #
         # PATH is emptied as well as the tools dir moved aside, because `tool_path` falls back
         # to PATH deliberately -- a developer with their own breseq should not have to wait for
         # a solve. On a machine that has one, not clearing it tests the developer's breseq.
-        with override_settings(ALEDB_TOOLS_DIR=os.path.join(self.tools, "empty")), \
+        with override_settings(MUTINT_TOOLS_DIR=os.path.join(self.tools, "empty")), \
                 mock.patch.dict(os.environ, {"PATH": ""}):
             self.assertEqual(self._launch().status_code, 200)
 

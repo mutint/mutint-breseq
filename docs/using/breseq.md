@@ -32,7 +32,7 @@ breseq, and every run fails identically.
 ## Launching a run
 
 1. Open **Run breseq** with an experiment selected.
-2. Type a **sample name**. This is what the sample is called everywhere in ALEdb.
+2. Type a **sample name**. This is what the sample is called everywhere in MutInt.
 3. Optionally type **breseq arguments**.
 4. Drop the sample's read files, and press **Run breseq**.
 

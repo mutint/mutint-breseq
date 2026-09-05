@@ -10,7 +10,7 @@ urlpatterns = [
     re_path(r'^run/(?P<pk>\d+)/delete$', mutint_breseq.views.run_delete,
             name='breseq_run_delete'),
     # There is no report route here any more. breseq's HTML is kept under the *sample* by
-    # aledb-core's importer and served by its own sandboxed viewer at
+    # mutint-core's importer and served by its own sandboxed viewer at
     # /mutations/report/<sample_id>/ -- one home for it, and the right one, since a report
     # describes the sample that was produced rather than the run that produced it.
 ]

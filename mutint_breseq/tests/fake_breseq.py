@@ -70,7 +70,7 @@ SCRIPT = textwrap.dedent('''\
 def install(tools_dir):
     """Write the fake into ``<tools_dir>/bin/breseq`` and return its path.
 
-    ``tools_dir`` is what `ALEDB_TOOLS_DIR` will be overridden to, so `tools.tool_path` finds
+    ``tools_dir`` is what `MUTINT_TOOLS_DIR` will be overridden to, so `tools.tool_path` finds
     this in preference to any real breseq the developer has on PATH.
     """
     bin_dir = os.path.join(tools_dir, "bin")

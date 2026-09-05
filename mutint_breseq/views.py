@@ -1,7 +1,7 @@
 """The launcher page, the launch endpoint, and serving what a run left behind.
 
 Shaped like every other page in the suite: function-based views, permission checked inline,
-hand-written Bootstrap posting to a `@require_POST` JSON endpoint through `aledbPostJson`. No
+hand-written Bootstrap posting to a `@require_POST` JSON endpoint through `mutintPostJson`. No
 Django ``Form`` classes -- there are two fields and a file drop.
 """
 
@@ -16,19 +16,19 @@ from django.shortcuts import render
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST
 
-import aledb_sample.views.common
-from aledb_common import store
-from aledb_common.fileserve import serve_file
-from aledb_common.util import get_user_context
-from aledb_experiment.models import Experiment
-from aledb_experiment.permissions import (
+import mutint_sample.views.common
+from mutint_common import store
+from mutint_common.fileserve import serve_file
+from mutint_common.util import get_user_context
+from mutint_experiment.models import Experiment
+from mutint_experiment.permissions import (
     can_edit_experiment,
     can_view_project,
     experiment_lock_refusal,
 )
-from aledb_import import reference_store, staging
-from aledb_jobs import jobs as jobs_api
-from aledb_import.upload_session import UploadError
+from mutint_import import reference_store, staging
+from mutint_jobs import jobs as jobs_api
+from mutint_import.upload_session import UploadError
 
 from mutint_breseq import runner, tasks
 from mutint_breseq.models import (
@@ -41,7 +41,7 @@ logger = logging.getLogger("mutint_breseq.views")
 
 # What a sample may be called. Deliberately narrow, and it is doing two jobs at once: this
 # string becomes a **directory name** under the store, and it is what
-# `aledb_import.sample_names.parse_sample_identity` reads the ALE, flask and isolate out of.
+# `mutint_import.sample_names.parse_sample_identity` reads the ALE, flask and isolate out of.
 # Both shapes that parser understands -- `3-30000-1-1` and `Ara-2_500gen_763A` -- fit inside
 # it, and nothing with a separator, a space or a leading dot does.
 SAMPLE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,99}$")
@@ -51,7 +51,7 @@ MAX_ARGUMENTS_CHARS = 2000
 
 def _experiment_or_none(request):
     try:
-        return aledb_sample.views.common.get_experiment(request)
+        return mutint_sample.views.common.get_experiment(request)
     except (Experiment.DoesNotExist, ValueError):
         return None
 
@@ -70,9 +70,9 @@ def breseq(request):
 
     context = get_user_context(request.user)
     try:
-        experiment = aledb_sample.views.common.get_experiment(request)
+        experiment = mutint_sample.views.common.get_experiment(request)
     except Experiment.DoesNotExist:
-        return aledb_sample.views.common.no_experiment_selected(
+        return mutint_sample.views.common.no_experiment_selected(
             request, context, logger, "breseq")
 
     context.update(experiment.experiment_context())
@@ -128,7 +128,7 @@ def _run_rows(experiment):
             "log": run.log,
             "sample_id": run.sample_id,
             # Core's viewer for the sample this run produced, not a route of our own. The
-            # report is stored under the sample by aledb-core's importer, so the link exists
+            # report is stored under the sample by mutint-core's importer, so the link exists
             # exactly when the sample does.
             "report_url": ("/mutations/report/%d/" % run.sample_id
                            if run.sample_id else None),
@@ -155,7 +155,7 @@ def launch(request):
     is a sample everybody sees, so a locked experiment has to refuse it, and a predicate handed
     the project cannot see a flag on the experiment. That is the call the suite's CLAUDE.md
     notes no plugin had yet had to make. Signed in as well, stated rather than left to be
-    inferred from three files -- see `aledb_import.staging.create_staging_session`.
+    inferred from three files -- see `mutint_import.staging.create_staging_session`.
     """
     if not request.user.is_authenticated:
         return JsonResponse({"error": "You must be signed in."}, status=403)
@@ -180,7 +180,7 @@ def launch(request):
         return JsonResponse(
             {"error": "A sample name may use letters, digits, dot, underscore, plus and "
                       "hyphen, and must start with a letter or digit. It becomes this "
-                      "sample's name everywhere in ALEdb."}, status=400)
+                      "sample's name everywhere in MutInt."}, status=400)
 
     arguments = (payload.get("arguments") or "").strip()
     if len(arguments) > MAX_ARGUMENTS_CHARS:
@@ -234,7 +234,7 @@ def launch(request):
     # run's post_delete receiver owns. Nothing is left for core's reaper to be racing.
     staging.close(session)
 
-    # Through aledb_jobs rather than `task.enqueue` directly, which is what puts the run on
+    # Through mutint_jobs rather than `task.enqueue` directly, which is what puts the run on
     # /jobs/ with a name and an owner and makes it stoppable. `cancellable=True` is a promise
     # the task keeps -- see runner.run_breseq_process, which polls between slices of output.
     job = jobs_api.enqueue(

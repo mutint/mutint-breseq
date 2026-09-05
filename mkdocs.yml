@@ -1,13 +1,13 @@
 # mutint-breseq's documentation. This component has no entry script of its own, so these pages
 # are read through an assembled project's manual -- `./mutint docs` collects them.
 #
-# The top-level nav heading is how a page declares who it is for. `Using ALEdb` and
-# `Extending ALEdb` are the two the manual merges; anything under another heading lands under
-# "About this deployment" named for this component. See aledb_common/docs_manual.py.
+# The top-level nav heading is how a page declares who it is for. `Using MutInt` and
+# `Extending MutInt` are the two the manual merges; anything under another heading lands under
+# "About this deployment" named for this component. See mutint_common/docs_manual.py.
 
 site_name: mutint-breseq
 site_description: Running breseq on uploaded reads, from the browser
 
 nav:
-  - Using ALEdb:
+  - Using MutInt:
       - Running breseq: using/breseq.md

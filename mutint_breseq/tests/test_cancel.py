@@ -17,11 +17,11 @@ import time
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 
-from aledb_common import store
-from aledb_experiment.models import Project
-from aledb_import import staging
-from aledb_import.tests import breseq_fixture
-from aledb_jobs import jobs as jobs_api
+from mutint_common import store
+from mutint_experiment.models import Project
+from mutint_import import staging
+from mutint_import.tests import breseq_fixture
+from mutint_jobs import jobs as jobs_api
 
 from mutint_breseq import runner, tasks
 from mutint_breseq.models import STATUS_CANCELLED, BreseqRun
@@ -166,7 +166,7 @@ class CancelledRunTestCase(TestCase):
         self.template = breseq_fixture.write_sample(self.template_root, "template")
 
         fake_breseq.install(self.tools)
-        patcher = override_settings(ALEDB_STORE_DIR=self.store, ALEDB_TOOLS_DIR=self.tools)
+        patcher = override_settings(MUTINT_STORE_DIR=self.store, MUTINT_TOOLS_DIR=self.tools)
         patcher.enable()
         self.addCleanup(patcher.disable)
 
@@ -177,7 +177,7 @@ class CancelledRunTestCase(TestCase):
             self.addCleanup(os.environ.pop, name, None)
 
         self.project = Project.objects.create(name="p", user=self.owner)
-        from aledb_experiment.views import _create_experiment
+        from mutint_experiment.views import _create_experiment
         self.experiment = _create_experiment(self.project, "e", self.owner)
         establish_reference(self.experiment)
 

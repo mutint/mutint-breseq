@@ -71,12 +71,12 @@ class ToolEnvironmentTestCase(TestCase):
     def test_the_tools_bin_leads_the_path(self):
         # breseq shells out to bowtie2, samtools and gnuplot by bare name and exits 0 when it
         # cannot find them, so this is what stands between a run and a silent no-op.
-        with override_settings(ALEDB_TOOLS_DIR="/managed/tools"):
+        with override_settings(MUTINT_TOOLS_DIR="/managed/tools"):
             env = runner.tool_environment({"PATH": "/usr/bin"})
         self.assertEqual(env["PATH"], os.path.join("/managed/tools", "bin") + os.pathsep + "/usr/bin")
 
     def test_an_unmanaged_environment_is_left_alone(self):
-        with override_settings(ALEDB_TOOLS_DIR=None):
+        with override_settings(MUTINT_TOOLS_DIR=None):
             env = runner.tool_environment({"PATH": "/usr/bin"})
         self.assertEqual(env["PATH"], "/usr/bin")
 
@@ -133,7 +133,7 @@ class CleanupTestCase(SimpleTestCase):
 
         This used to move `output/` aside into a `report/` of its own and return whether it
         had -- two homes for the same bytes, and the wrong one: a report describes the sample
-        that was produced, and the sample outlives the run row. aledb-core stores it now.
+        that was produced, and the sample outlives the run row. mutint-core stores it now.
         """
         runner.cleanup_after_import(self.run_dir, self.output_dir)
 

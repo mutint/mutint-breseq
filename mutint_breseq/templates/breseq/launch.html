@@ -36,7 +36,7 @@
             <input type="text" class="form-control" id="breseq-sample-name"
                    placeholder="e.g. 3-30000-1-1 or Ara-2_500gen_763A" autocomplete="off">
             <small class="help-block">
-                What this sample is called everywhere in ALEdb. Names shaped
+                What this sample is called everywhere in MutInt. Names shaped
                 <code>ALE-flask-isolate-replicate</code> (<code>3-30000-1-1</code>) or
                 <code>ALE_flask_isolate</code> (<code>Ara-2_500gen_763A</code>) also place the
                 sample on its ALE and time point; anything else is auto-numbered. Letters,
@@ -321,7 +321,7 @@
 
     dropzone.addEventListener("click", function () { fileInput.click(); });
     fileInput.addEventListener("change", function () {
-        addEntries(aledbFromFileList(fileInput.files));
+        addEntries(mutintFromFileList(fileInput.files));
     });
     ["dragenter", "dragover"].forEach(function (evt) {
         dropzone.addEventListener(evt, function (e) {
@@ -334,7 +334,7 @@
         });
     });
     dropzone.addEventListener("drop", function (e) {
-        aledbCollectDropped(e.dataTransfer).then(addEntries);
+        mutintCollectDropped(e.dataTransfer).then(addEntries);
     });
 
     form.addEventListener("submit", function (e) {
@@ -344,13 +344,13 @@
         submitBtn.disabled = true;
         setProgress(0, 1, "Preparing…");
 
-        aledbUpload(selected, {
+        mutintUpload(selected, {
             experimentId: EXPERIMENT_ID,
             consumer: COMPONENT,
             onProgress: setProgress
         }).then(function (uploadId) {
             setProgress(1, 1, "Queueing the run…");
-            return aledbPostJson("/breseq/launch?experiment_id=" + EXPERIMENT_ID, {
+            return mutintPostJson("/breseq/launch?experiment_id=" + EXPERIMENT_ID, {
                 upload_id: uploadId,
                 sample_name: nameInput.value,
                 arguments: argsInput.value

@@ -12,16 +12,17 @@ only by SHA inside that one clone. See the suite `CLAUDE.md`.
 
 A page that runs breseq. Drop an experiment's FASTQ reads on `/breseq/`, name the sample, and
 breseq runs in the background against that experiment's stored reference; its output folder is
-then handed to **aledb-core's own `aledb_import.breseq_folder`**, so the sample that lands is
+then handed to **mutint-core's own `mutint_import.breseq_folder`**, so the sample that lands is
 indistinguishable from one analyzed elsewhere and dropped on the Add Data page.
 
 That last clause is the design. This plugin does not import anything itself — it *produces the
 input* to core's importer and gets out of the way. Nothing here parses a `.gd`, writes a
 `Mutation`, or knows what a sample's coordinate is.
 
-**The name is MutInt's, not the platform's.** Every other plugin is `aledb-*`; this one is
-named for the deployment that asked for it and is deliberately absent from
-`aledb-deploy/.gitmodules`. That is the whole of what keeps it out of ALEdb — omitting it from
+**The name no longer sets it apart, and used to.** Every other plugin was `aledb-*` and this
+one was named for the deployment that asked for it; the platform is MutInt now, so the name
+says nothing about where it is installed. It is deliberately absent from `aledb/.gitmodules`,
+and that is the whole of what keeps it out of ALEdb — omitting it from
 a project's `.gitmodules` is how a component is not installed.
 
 ---
@@ -35,7 +36,7 @@ a project's `.gitmodules` is how a component is not installed.
 | `views.py` | the page, the launch endpoint, the run list |
 | `models.py` | `BreseqRun`, and the receiver that owns its directory |
 
-`runner.py` is pure on purpose, in the shape `aledb_sample/locus.py` is: the two rules most
+`runner.py` is pure on purpose, in the shape `mutint_sample/locus.py` is: the two rules most
 likely to be changed by accident are what reaches breseq's argv and what has to be on disk
 before the importer is called, and both are testable without breseq, a worker or a request.
 
@@ -102,7 +103,7 @@ this was written.
 
 The first `cancellable=True` task in the suite. The queue cannot interrupt a running task -- it
 has no cancel API, and its worker calls the function and looks at nothing again until it
-returns -- so `aledb_jobs` records a flag and `runner.run_breseq_process` polls it between
+returns -- so `mutint_jobs` records a flag and `runner.run_breseq_process` polls it between
 slices of output. That is why `subprocess.run` is gone: it blocks until exit, so there is no
 moment at which anything could ask.
 
@@ -139,7 +140,7 @@ half an hour. It is taken **only around the ingest**, never around the breseq ru
 `_fail` writes the row, then the exception goes on. Both halves matter and the second is easy
 to delete: the row is what a person reads, and the queue's own record is what says a worker
 tried and could not. A task that returned quietly would leave `db_worker` reporting a clean run
-of a job that did nothing. Same posture as `aledb_import.tasks.build_coverage` calling the
+of a job that did nothing. Same posture as `mutint_import.tasks.build_coverage` calling the
 raising variant. `test_the_task_re_raises_after_recording_a_failure` pins it, and has to call
 the task directly — `.enqueue()` hands the exception to the backend.
 
@@ -154,7 +155,7 @@ least equipped to guess at; it is worth a column.
 ### The report is the sample's, not the run's
 
 This plugin used to keep breseq's `output/` in a `report/` of its own and serve it at
-`/breseq/run/<pk>/report/<path>`. Both are gone. **aledb-core keeps the report under the
+`/breseq/run/<pk>/report/<path>`. Both are gone. **mutint-core keeps the report under the
 sample** -- `breseq_folder._store_report` into `store.sample_report_dir` -- and serves it
 sandboxed at `/mutations/report/<sample_id>/`, so the run list simply links there.
 
@@ -184,8 +185,8 @@ the reads matter.
 - **It registers no import handler.** A FASTQ drop needs a sample name and a command line, and
   `handle(experiment, staged_root, paths, user)` can carry neither — registering would put an
   entry in the Add page's dropdown that cannot carry what the entry needs. The upload machinery
-  is still core's: `aledb_import.staging` was added for this, and `docs/plugin/staging.md` in
-  aledb-core is the guide.
+  is still core's: `mutint_import.staging` was added for this, and `docs/plugin/staging.md` in
+  mutint-core is the guide.
 - **It registers no rebuilder.** It derives nothing from the mutations, it *makes* them once.
   Core's importer asks for every registered rebuild itself.
 - **No export handler, no example dataset.** It adds no mutation type, and an example would
@@ -210,7 +211,7 @@ itself. See **Cancellation is cooperative** above.)*
 cd mutint && ./mutint test mutint_breseq
 ```
 
-There is no way to run them from aledb-core: the plugin is not installed there.
+There is no way to run them from mutint-core: the plugin is not installed there.
 
 **59 tests**, and the end-to-end ones are affordable because of two things. The test runner
 forces `django.tasks` to its immediate backend, so `.enqueue()` runs inline and one POST
@@ -220,9 +221,9 @@ to be wrong here are the argv and the PATH, and a patch would assert against the
 than against a process that actually has to start. It records its own argv and `PATH` to a
 file, which is how those two are checked.
 
-The template it copies into `-o` is built by **aledb-core's own** `breseq_fixture.write_sample`,
+The template it copies into `-o` is built by **mutint-core's own** `breseq_fixture.write_sample`,
 so the shape the fake produces cannot drift from the shape the importer requires.
 
 One gotcha, found the hard way: `tools.tool_path` falls back to `PATH` by design, so a test
-asserting "breseq is missing" must clear `PATH` as well as move `ALEDB_TOOLS_DIR` aside — on a
+asserting "breseq is missing" must clear `PATH` as well as move `MUTINT_TOOLS_DIR` aside — on a
 machine with a real breseq installed it otherwise tests the developer's copy.

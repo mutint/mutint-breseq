@@ -1,7 +1,7 @@
 # External (non-Python) tools this component needs, as conda package specs -- one per line,
 # `#` comments ignored. The entry script collects these from every component the same way it
 # collects requirements.txt, and installs them into env/tools with micromamba. Code finds
-# them through aledb_common.tools.tool_path(), which falls back to PATH.
+# them through mutint_common.tools.tool_path(), which falls back to PATH.
 #
 # breseq itself, which mutint_breseq/tasks.py runs on the reads dropped on /breseq/.
 #

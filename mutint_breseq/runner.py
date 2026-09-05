@@ -1,6 +1,6 @@
 """Building a breseq command line, and checking what it produced.
 
-Pure, in the shape `aledb_sample/locus.py` and `functional_change.py` are: no request, no
+Pure, in the shape `mutint_sample/locus.py` and `functional_change.py` are: no request, no
 worker, no database. That is what lets the two rules most likely to be got wrong -- what goes
 on the command line, and what the output has to look like for the importer to read it -- be
 tested without running breseq at all.
@@ -13,7 +13,7 @@ import signal
 import subprocess
 import time
 
-from aledb_common import tools
+from mutint_common import tools
 
 BRESEQ = "breseq"
 
@@ -36,7 +36,7 @@ class Cancelled(Exception):
 # box does nothing.
 PROCESSOR_FLAGS = ("-j", "--num-processors")
 
-# What `aledb_import.breseq_folder` requires of a sample directory, and therefore what a run
+# What `mutint_import.breseq_folder` requires of a sample directory, and therefore what a run
 # must have produced before it is worth calling the importer. breseq 0.50 writes all five
 # itself, which is why nothing here reshapes anything -- but the check is still made, because
 # the alternative is the importer reporting "has no data/output.gd" for a run that in truth
@@ -201,7 +201,7 @@ def cleanup_after_import(run_dir, output_dir):
     """Throw the whole run away. The importer has already kept everything worth keeping.
 
     That is `data/`'s four files **and breseq's HTML report**, both copied into the store
-    under the sample's own primary key by `aledb_import.breseq_folder`. This used to move
+    under the sample's own primary key by `mutint_import.breseq_folder`. This used to move
     `output/` aside into a `report/` of its own and serve it from here, which made two homes
     for the same bytes -- and the wrong one, because a report is a property of the *sample*
     that was produced and a sample outlives the run row that made it.

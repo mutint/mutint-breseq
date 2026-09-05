@@ -22,7 +22,7 @@ from django.db import models
 from django.db.models.signals import post_delete
 from django.dispatch import receiver
 
-from aledb_common import store
+from mutint_common import store
 
 logger = logging.getLogger("mutint_breseq.models")
 
@@ -59,7 +59,7 @@ MAX_LOG_CHARS = 20000
 class BreseqRun(models.Model):
     """One launch: some reads, a sample name, and whatever breseq made of them."""
 
-    experiment = models.ForeignKey("aledb_experiment.Experiment",
+    experiment = models.ForeignKey("mutint_experiment.Experiment",
                                    on_delete=models.CASCADE, related_name="breseq_runs")
     # SET_NULL rather than CASCADE: deleting a person must not delete the record of an
     # analysis, which is a fact about the data rather than about them.
@@ -92,10 +92,10 @@ class BreseqRun(models.Model):
     # made it; the row then says what happened and no longer points anywhere.
     #
     # It is also where breseq's HTML report went. This model carried a `report_stored` flag
-    # and a `report/` directory of its own, and both are gone: aledb-core keeps the report
+    # and a `report/` directory of its own, and both are gone: mutint-core keeps the report
     # under the *sample*, which is where it belongs -- a report describes the sample that was
     # produced, and the sample outlives this row.
-    sample = models.ForeignKey("aledb_sample.Sample", null=True, blank=True,
+    sample = models.ForeignKey("mutint_sample.Sample", null=True, blank=True,
                                on_delete=models.SET_NULL, related_name="breseq_runs")
 
     class Meta:
