@@ -36,7 +36,7 @@ breseq, and every run fails identically.
 3. Optionally type **breseq arguments**.
 4. Drop the sample's read files, and press **Run breseq**.
 
-Everything you drop is one sample's reads — both mates of a pair, or several lanes. To analyse
+Everything you drop is one sample's reads — both mates of a pair, or several lanes. To analyze
 a second sample, launch again.
 
 ### The sample name is worth thinking about
@@ -119,7 +119,7 @@ remove the data. Delete the sample itself from the mutation editor if that is wh
 
 ## What it does not do
 
-- **It does not analyse several samples at once.** One launch is one sample; launch again for
+- **It does not analyze several samples at once.** One launch is one sample; launch again for
   the next. Several launches queue and run in order.
 - **It does not choose the reference.** Every run uses the experiment's own, which is what
   makes the resulting samples comparable with everything else in it.

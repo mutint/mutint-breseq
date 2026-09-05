@@ -4,7 +4,7 @@ The second thing in the suite to move off the request path, and the first that h
 coverage derivation was enqueued because 900 seconds is rude, and this is *hours*. It is what
 `WORKERS.md` meant by work the queue exists for.
 
-**The argument is a primary key, not a model** -- `django.tasks` serialises arguments as JSON,
+**The argument is a primary key, not a model** -- `django.tasks` serializes arguments as JSON,
 the same contract `aledb_import.tasks.build_coverage` states. And like that task this one
 **re-raises** after recording the failure, rather than swallowing it: the row is what a person
 reads and the queue's own record is what says a worker tried and could not, and the two failure

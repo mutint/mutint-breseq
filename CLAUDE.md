@@ -13,7 +13,7 @@ only by SHA inside that one clone. See the suite `CLAUDE.md`.
 A page that runs breseq. Drop an experiment's FASTQ reads on `/breseq/`, name the sample, and
 breseq runs in the background against that experiment's stored reference; its output folder is
 then handed to **aledb-core's own `aledb_import.breseq_folder`**, so the sample that lands is
-indistinguishable from one analysed elsewhere and dropped on the Add Data page.
+indistinguishable from one analyzed elsewhere and dropped on the Add Data page.
 
 That last clause is the design. This plugin does not import anything itself — it *produces the
 input* to core's importer and gets out of the way. Nothing here parses a `.gd`, writes a
