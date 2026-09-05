@@ -207,7 +207,12 @@ def run_breseq(run_id):
         # `find_sample_dirs` finds that one and takes its name from the basename -- which is
         # why nothing here passes a sample name. One rule about what a sample is called, and
         # it is aledb-core's.
-        summary = breseq_folder.import_samples_into(experiment, run.directory())
+        # `user=` so the coverage job core enqueues from inside that import is attributed to
+        # whoever launched this run, and appears on their /jobs/ page rather than only in the
+        # superuser-only unattributed list. It is the one thing this call contributes beyond
+        # handing over a directory.
+        summary = breseq_folder.import_samples_into(experiment, run.directory(),
+                                                    user=run.created_by)
     except Exception as exc:
         _fail(run, "breseq finished but its output could not be imported: %s" % exc,
               log=output)
