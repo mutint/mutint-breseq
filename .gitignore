@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+
+# Django
+*.sqlite3
+local_settings.py
+media/
+*.log
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Environment / secrets
+.env
+.env.*
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

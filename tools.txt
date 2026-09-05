@@ -1,0 +1,24 @@
+# External (non-Python) tools this component needs, as conda package specs -- one per line,
+# `#` comments ignored. The entry script collects these from every component the same way it
+# collects requirements.txt, and installs them into env/tools with micromamba. Code finds
+# them through aledb_common.tools.tool_path(), which falls back to PATH.
+#
+# breseq itself, which mutint_breseq/tasks.py runs on the reads dropped on /breseq/.
+#
+# **The channel is written into the spec, and has to be.** breseq-prerelease is published from
+# the lab's own channel rather than to bioconda, and the entry script's channel list is
+# `-c conda-forge -c bioconda` -- three byte-identical copies of a file with no tests, which
+# is not a thing to edit for one package. micromamba takes `channel::package` with a URL
+# channel, so the dependency declares its own source and the entry scripts stay untouched.
+# Its dependencies (bowtie2, samtools, htslib, gnuplot, phylip) resolve from bioconda, which
+# is already on that list.
+#
+# Prerelease rather than the stable bioconda `breseq` because this tracks breseq's master:
+# every build reports a version derived from git (0.40.1.dev417+g1a30aed3), so the spec is
+# unpinned and `rm -rf env/tools` is how you move it.
+#
+# **breseq shells out to its own toolchain by bare name** -- bowtie2, samtools, gnuplot --
+# so `tool_path("breseq")` is not sufficient on its own: the subprocess needs env/tools/bin
+# on PATH or breseq stops with `Required executable "bowtie2" not found`, having exited 0.
+# mutint_breseq/runner.py `tool_environment()` is what builds that PATH.
+https://barricklab.github.io/conda/::breseq-prerelease

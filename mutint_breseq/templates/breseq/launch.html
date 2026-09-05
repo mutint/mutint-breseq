@@ -1,0 +1,373 @@
+{% extends 'base.html' %}
+
+{% block title %}Run breseq — {{ experiment.name }}{% endblock %}
+
+{% block header %}
+    <b>{{ experiment.name }}</b> &mdash; Run breseq
+{% endblock %}
+
+{% block content %}
+<div class="col-lg-10">
+
+{% if not has_reference %}
+    <div class="alert alert-warning">
+        <b>This experiment has no reference genome yet.</b>
+        breseq calls mutations against one, so there is nothing to run yet. Establish a
+        reference first &mdash; drop a GenBank, GFF3 or FASTA on the
+        <a href="/import/add/?experiment_id={{ experiment_id }}">Add data</a> page &mdash; and
+        this page will offer the form.
+    </div>
+{% elif not can_launch %}
+    <div class="alert alert-warning">
+        {% if lock_refusal %}{{ lock_refusal }}{% else %}
+        You have read access to this experiment, so you can see what has been run here but
+        cannot start anything new.{% endif %}
+    </div>
+{% else %}
+    <p>Drop this sample's FASTQ read files below. They are uploaded, then breseq runs against
+       <b>{{ experiment.name }}</b>'s reference genome and its output is imported as one
+       sample.</p>
+
+    <form id="breseq-form">
+        {% csrf_token %}
+
+        <div class="form-group">
+            <label for="breseq-sample-name">Sample name</label>
+            <input type="text" class="form-control" id="breseq-sample-name"
+                   placeholder="e.g. 3-30000-1-1 or Ara-2_500gen_763A" autocomplete="off">
+            <small class="help-block">
+                What this sample is called everywhere in ALEdb. Names shaped
+                <code>ALE-flask-isolate-replicate</code> (<code>3-30000-1-1</code>) or
+                <code>ALE_flask_isolate</code> (<code>Ara-2_500gen_763A</code>) also place the
+                sample on its ALE and time point; anything else is auto-numbered. Letters,
+                digits, dot, underscore, plus and hyphen.
+            </small>
+        </div>
+
+        <div class="form-group">
+            <label for="breseq-arguments">breseq arguments <small>(optional)</small></label>
+            <input type="text" class="form-control" id="breseq-arguments"
+                   placeholder="e.g. -p --polymorphism-minimum-variant-coverage 4"
+                   autocomplete="off">
+            <small class="help-block">
+                Passed to breseq as typed. <code>-o</code> and <code>-r</code> are supplied
+                for you, and <code>-j</code> defaults to every processor on this machine
+                unless you name one here.
+            </small>
+        </div>
+
+        <div id="breseq-dropzone" style="border: 2px dashed #999; border-radius: 6px;
+             padding: 2.5em; text-align: center; color: #666; background: #fafafa;
+             cursor: pointer;">
+            <p style="margin: 0; font-size: 1.1em;">Drag &amp; drop this sample's read files
+               here, or click to choose.</p>
+            <input type="file" id="breseq-file-input" multiple style="display: none;">
+        </div>
+
+        <ul id="breseq-file-list" style="margin-top: 1em;"></ul>
+
+        <div id="breseq-progress" style="display: none; margin-top: 1em;">
+            <div class="progress" style="margin-bottom: 0.4em;">
+                <div id="breseq-progress-bar" class="progress-bar" role="progressbar"
+                     style="width: 0%;">0%</div>
+            </div>
+            <small id="breseq-progress-text" style="color: #666;"></small>
+        </div>
+
+        <div id="breseq-error"></div>
+
+        <button type="submit" class="btn btn-primary" id="breseq-submit" disabled>
+            Run breseq</button>
+        <a class="btn btn-default"
+           href="/stats?experiment_id={{ experiment_id }}">Back to experiment</a>
+    </form>
+{% endif %}
+
+    <h3 style="margin-top: 2em;">Runs</h3>
+    <div id="breseq-runs"></div>
+
+</div>
+
+{{ runs|json_script:"breseq-runs-data" }}
+
+<script type="text/javascript">
+(function () {
+    "use strict";
+
+    var EXPERIMENT_ID = "{{ experiment_id }}";
+    var COMPONENT = "{{ component }}";
+    // Slower than the Add page's 400ms, and deliberately: what is being watched here changes
+    // on the scale of hours, not of samples-per-second. A run that has not moved in four
+    // minutes is normal.
+    var POLL_MS = 5000;
+
+    var runsData = JSON.parse(
+        document.getElementById("breseq-runs-data").textContent);
+    var runsEl = document.getElementById("breseq-runs");
+    var form = document.getElementById("breseq-form");
+    var pollTimer = null;
+    // Same guard as the Add page's: a poll already in flight when something else redraws must
+    // not paint a stale list over the top of it.
+    var pollGeneration = 0;
+
+    function esc(text) {
+        var div = document.createElement("div");
+        div.textContent = text === null || text === undefined ? "" : String(text);
+        return div.innerHTML;
+    }
+
+    function whenLocal(iso) {
+        if (!iso) { return ""; }
+        var when = new Date(iso);
+        return isNaN(when.getTime()) ? "" : when.toLocaleString();
+    }
+
+    function elapsed(run) {
+        var from = run.started_at || run.created_at;
+        var to = run.finished_at;
+        if (!from) { return ""; }
+        var end = to ? new Date(to) : new Date();
+        var seconds = Math.max(0, Math.round((end - new Date(from)) / 1000));
+        if (seconds < 90) { return seconds + "s"; }
+        if (seconds < 5400) { return Math.round(seconds / 60) + "m"; }
+        return (seconds / 3600).toFixed(1) + "h";
+    }
+
+    // The one thing the status column has to get right. A row that says "queued" is either a
+    // job waiting its turn or a job nothing will ever pick up, and the second is by far this
+    // feature's likeliest failure -- so where the queue can tell us, it does.
+    function statusCell(run) {
+        if (run.status === "imported") {
+            return '<span class="label label-success">Imported</span>';
+        }
+        if (run.status === "failed") {
+            return '<span class="label label-danger">Failed</span>';
+        }
+        if (run.status === "running") {
+            return '<span class="label label-info">Running</span>';
+        }
+        var note = "";
+        if (run.queue_status === "READY" || run.queue_status === "") {
+            note = '<br><small style="color: #a94442;">waiting for a worker &mdash; ' +
+                   'run <code>./mutint db_worker</code></small>';
+        }
+        return '<span class="label label-default">Queued</span>' + note;
+    }
+
+    function resultCell(run) {
+        if (run.status === "imported") {
+            var bits = [];
+            if (run.sample_id) {
+                bits.push('<a href="/mutations/breseq?experiment_id=' + EXPERIMENT_ID +
+                          "&sample_id=" + run.sample_id + '">Mutations</a>');
+            }
+            if (run.report_url) {
+                bits.push('<a href="' + run.report_url + '" target="_blank">' +
+                          "breseq report</a>");
+            }
+            return bits.join(" &middot; ") || "&mdash;";
+        }
+        if (run.error) {
+            return '<span style="color: #a94442;">' + esc(run.error) + "</span>";
+        }
+        return "&mdash;";
+    }
+
+    function detailRow(run) {
+        var parts = [];
+        if (run.arguments) {
+            parts.push("<b>Arguments</b> <code>" + esc(run.arguments) + "</code>");
+        }
+        if ((run.read_files || []).length) {
+            parts.push("<b>Reads</b> " + esc(run.read_files.join(", ")));
+        }
+        if (!parts.length) { return ""; }
+        return '<tr><td colspan="5" style="border-top: 0; padding-top: 0; color: #666;">' +
+               '<small>' + parts.join(" &nbsp;&middot;&nbsp; ") + "</small></td></tr>";
+    }
+
+    function logRow(run) {
+        if (!run.log || run.status !== "failed") { return ""; }
+        return '<tr><td colspan="5" style="border-top: 0; padding-top: 0;">' +
+               '<details><summary style="cursor: pointer; color: #666;">' +
+               "<small>breseq output</small></summary>" +
+               '<pre style="max-height: 20em; overflow: auto; font-size: 11px;">' +
+               esc(run.log) + "</pre></details></td></tr>";
+    }
+
+    function renderRuns(runs) {
+        if (!runs.length) {
+            runsEl.innerHTML = '<p style="color: #666;">Nothing has been run for this ' +
+                               "experiment yet.</p>";
+            return;
+        }
+        var html = ['<table class="table table-condensed">',
+                    "<thead><tr><th>Sample</th><th>Status</th><th>Started</th>",
+                    "<th>Took</th><th>Result</th></tr></thead><tbody>"];
+        runs.forEach(function (run) {
+            html.push("<tr>",
+                      "<td>" + esc(run.sample_name) + "</td>",
+                      "<td>" + statusCell(run) + "</td>",
+                      "<td><small>" + esc(whenLocal(run.started_at || run.created_at)) +
+                          "</small></td>",
+                      "<td><small>" + esc(elapsed(run)) + "</small></td>",
+                      "<td>" + resultCell(run) + "</td>",
+                      "</tr>", detailRow(run), logRow(run));
+        });
+        html.push("</tbody></table>");
+        runsEl.innerHTML = html.join("");
+    }
+
+    function anyUnfinished(runs) {
+        return runs.some(function (run) {
+            return run.status === "queued" || run.status === "running";
+        });
+    }
+
+    function stopPolling() {
+        if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+        pollGeneration += 1;
+    }
+
+    // Polls only while something is actually in flight, and stops when nothing is. A page
+    // left open on a finished experiment should cost nothing.
+    function startPolling() {
+        stopPolling();
+        var mine = pollGeneration;
+
+        function poll() {
+            fetch("/breseq/runs?experiment_id=" + EXPERIMENT_ID)
+                .then(function (resp) { return resp.ok ? resp.json() : null; })
+                .then(function (body) {
+                    if (mine !== pollGeneration) { return; }
+                    if (body && body.runs) {
+                        runsData = body.runs;
+                        renderRuns(runsData);
+                        if (!anyUnfinished(runsData)) { stopPolling(); return; }
+                    }
+                    pollTimer = setTimeout(poll, POLL_MS);
+                })
+                .catch(function () {
+                    if (mine !== pollGeneration) { return; }
+                    pollTimer = setTimeout(poll, POLL_MS);
+                });
+        }
+        pollTimer = setTimeout(poll, POLL_MS);
+    }
+
+    function refresh(runs) {
+        runsData = runs;
+        renderRuns(runsData);
+        if (anyUnfinished(runsData)) { startPolling(); } else { stopPolling(); }
+    }
+
+    renderRuns(runsData);
+    if (anyUnfinished(runsData)) { startPolling(); }
+
+    // Everything below is the form, which a reader without write access does not get.
+    if (!form) { return; }
+
+    var selected = [];
+    var dropzone = document.getElementById("breseq-dropzone");
+    var fileInput = document.getElementById("breseq-file-input");
+    var fileListEl = document.getElementById("breseq-file-list");
+    var submitBtn = document.getElementById("breseq-submit");
+    var nameInput = document.getElementById("breseq-sample-name");
+    var argsInput = document.getElementById("breseq-arguments");
+    var errorEl = document.getElementById("breseq-error");
+    var progressEl = document.getElementById("breseq-progress");
+    var progressBar = document.getElementById("breseq-progress-bar");
+    var progressText = document.getElementById("breseq-progress-text");
+
+    function humanBytes(size) {
+        if (size < 1024) { return size + " B"; }
+        if (size < 1048576) { return (size / 1024).toFixed(0) + " KB"; }
+        if (size < 1073741824) { return (size / 1048576).toFixed(1) + " MB"; }
+        return (size / 1073741824).toFixed(2) + " GB";
+    }
+
+    function renderList() {
+        fileListEl.innerHTML = selected.map(function (entry) {
+            return "<li>" + esc(entry.path) + " <small style='color: #666;'>" +
+                   humanBytes(entry.file.size) + "</small></li>";
+        }).join("");
+        submitBtn.disabled = !selected.length;
+    }
+
+    function addEntries(entries) {
+        entries.forEach(function (entry) {
+            // A second drop adds to the first rather than replacing it, so a pair whose mates
+            // live in different folders can be assembled in two gestures. Same path twice is
+            // the same file.
+            if (!selected.some(function (had) { return had.path === entry.path; })) {
+                selected.push(entry);
+            }
+        });
+        renderList();
+    }
+
+    function setProgress(done, total, label) {
+        progressEl.style.display = "block";
+        var pct = total ? Math.floor((done / total) * 100) : 0;
+        progressBar.style.width = pct + "%";
+        progressBar.textContent = pct + "%";
+        progressText.textContent = label;
+    }
+
+    function renderError(message) {
+        errorEl.innerHTML = '<div class="alert alert-danger" style="margin-top: 1em;">' +
+                            esc(message) + "</div>";
+    }
+
+    dropzone.addEventListener("click", function () { fileInput.click(); });
+    fileInput.addEventListener("change", function () {
+        addEntries(aledbFromFileList(fileInput.files));
+    });
+    ["dragenter", "dragover"].forEach(function (evt) {
+        dropzone.addEventListener(evt, function (e) {
+            e.preventDefault(); dropzone.style.background = "#eef6ff";
+        });
+    });
+    ["dragleave", "drop"].forEach(function (evt) {
+        dropzone.addEventListener(evt, function (e) {
+            e.preventDefault(); dropzone.style.background = "#fafafa";
+        });
+    });
+    dropzone.addEventListener("drop", function (e) {
+        aledbCollectDropped(e.dataTransfer).then(addEntries);
+    });
+
+    form.addEventListener("submit", function (e) {
+        e.preventDefault();
+        if (!selected.length) { return; }
+        errorEl.innerHTML = "";
+        submitBtn.disabled = true;
+        setProgress(0, 1, "Preparing…");
+
+        aledbUpload(selected, {
+            experimentId: EXPERIMENT_ID,
+            consumer: COMPONENT,
+            onProgress: setProgress
+        }).then(function (uploadId) {
+            setProgress(1, 1, "Queueing the run…");
+            return aledbPostJson("/breseq/launch?experiment_id=" + EXPERIMENT_ID, {
+                upload_id: uploadId,
+                sample_name: nameInput.value,
+                arguments: argsInput.value
+            });
+        }).then(function (body) {
+            progressEl.style.display = "none";
+            selected = [];
+            nameInput.value = "";
+            renderList();
+            refresh(body.runs || []);
+        }).catch(function (err) {
+            progressEl.style.display = "none";
+            renderError(err.message || String(err));
+        }).then(function () {
+            renderList();
+        });
+    });
+}());
+</script>
+{% endblock %}
