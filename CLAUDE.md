@@ -98,6 +98,34 @@ and `reference.sequence_set_digest` of the two is equal — which is what stops
 `_establish_or_check_reference` rejecting every run as a reference mismatch. Verified before
 this was written.
 
+### Cancellation is cooperative, and reaches the whole process group
+
+The first `cancellable=True` task in the suite. The queue cannot interrupt a running task -- it
+has no cancel API, and its worker calls the function and looks at nothing again until it
+returns -- so `aledb_jobs` records a flag and `runner.run_breseq_process` polls it between
+slices of output. That is why `subprocess.run` is gone: it blocks until exit, so there is no
+moment at which anything could ask.
+
+**`start_new_session=True` and `os.killpg`, never `process.kill()`.** breseq spawns bowtie2 and
+samtools; killing only the parent leaves them running with no parent at all, and the job would
+report itself stopped while the machine stayed saturated -- worse than not offering the button.
+`test_cancelling_kills_the_process_and_its_children` asserts a spawned child dies too, because
+`process.kill()` would pass a test that checked only the parent.
+
+**Cancellation is not failure and is not re-raised.** Letting it out would record the job FAILED
+on the queue and put a traceback in front of somebody who got what they asked for. It is its own
+status, and it is the one path that **deletes** the reads and the partial output: a failure is
+something to diagnose, a cancellation is not.
+
+Three places poll, and the third is easy to forget: at task entry (a job cancelled while queued
+is still handed to a worker, because `request_cancel` deliberately never touches the queue row),
+inside the run loop, and while waiting for the import lock -- that wait can be half an hour, and
+a wait nobody can give up on is the same dead end as a job nobody can stop.
+
+**`run_delete` refuses an unfinished run.** The `post_delete` receiver rmtrees the run
+directory, so deleting a running one pulls the reads out from under the live subprocess and
+breseq then fails minutes later naming neither cause nor culprit. Cancel, then delete.
+
 ### The import lock is waited on, not raced
 
 `import_lock.acquire()` refuses immediately, because the web path would rather answer 409 than
@@ -146,9 +174,17 @@ the reads matter.
   Core's importer asks for every registered rebuild itself.
 - **No export handler, no example dataset.** It adds no mutation type, and an example would
   have to ship reads and run breseq to demonstrate anything.
-- **No cancel button.** The process belongs to the worker, and a status the product cannot
-  enforce is a button that lies.
 - **No multi-sample launch.** One launch is one sample. Several launches queue.
+- **No anonymous use.** `breseq`, `launch`, `runs` and `run_delete` all say
+  `if not request.user.is_authenticated` outright, as `project_create` does, even though
+  `can_edit_experiment` already refuses anonymous. The rule is stated rather than left to be
+  inferred from three files — the shape that has bitten this suite before is an endpoint whose
+  author had no object to run a predicate against.
+
+*(This list used to end **No cancel button**, on the grounds that the process belongs to the
+worker and a status the product cannot enforce is a button that lies. The first half is still
+true of the queue and the second is still the rule; what changed is that the task now stops
+itself. See **Cancellation is cooperative** above.)*
 
 ---
 
@@ -160,7 +196,7 @@ cd mutint && ./mutint test mutint_breseq
 
 There is no way to run them from aledb-core: the plugin is not installed there.
 
-**52 tests**, and the end-to-end ones are affordable because of two things. The test runner
+**62 tests**, and the end-to-end ones are affordable because of two things. The test runner
 forces `django.tasks` to its immediate backend, so `.enqueue()` runs inline and one POST
 exercises launch, the subprocess, the ingest and the cleanup. And `tests/fake_breseq.py` is a
 **real executable on disk** rather than a `subprocess.run` patch — the two things most likely

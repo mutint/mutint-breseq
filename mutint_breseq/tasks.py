@@ -19,6 +19,7 @@ which is what makes a failed one roll back on its own.
 
 import logging
 import os
+import shutil
 import subprocess
 import time
 
@@ -30,9 +31,11 @@ from aledb_common import store
 from aledb_common.tools import ToolMissing
 from aledb_import import breseq_folder, import_lock
 from aledb_import.import_lock import ImportInProgress
+from aledb_jobs import jobs
 
 from mutint_breseq import runner
 from mutint_breseq.models import (
+    STATUS_CANCELLED,
     STATUS_FAILED,
     STATUS_IMPORTED,
     STATUS_RUNNING,
@@ -59,6 +62,25 @@ def _timeout():
     return getattr(settings, "MUTINT_BRESEQ_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
 
 
+def _cancelled(run, log=None):
+    """Record that somebody stopped this, and throw the work away.
+
+    **The one respect in which cancelled differs from failed**, which keeps everything: a
+    failure is something to diagnose and a cancellation is not. Somebody decided they did not
+    want this, so keeping gigabytes of half-finished analysis serves nobody.
+    """
+    run.status = STATUS_CANCELLED
+    run.error = ""
+    run.finished_at = timezone.now()
+    if log is not None:
+        run.log = run.truncated_log(log)
+    run.save(update_fields=["status", "error", "finished_at", "log"])
+
+    shutil.rmtree(run.reads_dir(), ignore_errors=True)
+    shutil.rmtree(run.output_dir(), ignore_errors=True)
+    logger.info("breseq run %s cancelled", run.pk)
+
+
 def _fail(run, message, log=None):
     """Record why, keep the directory, and hand the exception on."""
     run.status = STATUS_FAILED
@@ -69,7 +91,7 @@ def _fail(run, message, log=None):
     run.save(update_fields=["status", "error", "finished_at", "log"])
 
 
-def _wait_for_import_lock(holder):
+def _wait_for_import_lock(holder, task_result_id=None):
     """Hold the import lock, waiting rather than failing if somebody else has it.
 
     `import_lock.acquire()` refuses immediately by design -- the web path would rather answer
@@ -79,6 +101,12 @@ def _wait_for_import_lock(holder):
     """
     deadline = time.monotonic() + LOCK_WAIT_SECONDS
     while True:
+        # Cancellable here too. A run whose breseq has finished may still wait half an hour
+        # behind a web import, and half an hour is long enough that somebody may change their
+        # mind -- a wait that cannot be given up on is the same dead end as a job that cannot
+        # be stopped.
+        jobs.check_cancelled(task_result_id, "This run was cancelled while it waited to be "
+                                             "imported.")
         try:
             import_lock.acquire(holder=holder)
             return
@@ -96,6 +124,13 @@ def run_breseq(run_id):
         # Deleted between enqueue and execution. Not an error: there is nothing to run, and
         # the post_delete receiver has already taken the reads with it.
         logger.info("breseq run %s is gone; nothing to do", run_id)
+        return None
+
+    # Asked before anything is done. A job cancelled while it sat on the queue is still handed
+    # to a worker -- `jobs.request_cancel` deliberately never touches the queue row -- so this
+    # is where that cancellation actually takes effect.
+    if jobs.is_cancelled(run.task_result_id):
+        _cancelled(run)
         return None
 
     experiment = run.experiment
@@ -128,11 +163,16 @@ def run_breseq(run_id):
     logger.info("breseq run %s starting: %s", run.pk, " ".join(argv))
 
     try:
-        completed = subprocess.run(
-            argv,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            env=runner.tool_environment(),
-            timeout=_timeout())
+        returncode, output = runner.run_breseq_process(
+            argv, runner.tool_environment(), _timeout(),
+            is_cancelled=lambda: jobs.is_cancelled(run.task_result_id))
+    except runner.Cancelled:
+        # The process and its whole group are already gone by here; `run_breseq_process`
+        # stops them before it raises. Nothing is re-raised: a cancellation is not a
+        # failure, and letting it out would record the job as FAILED on the queue and put a
+        # traceback in front of somebody who got exactly what they asked for.
+        _cancelled(run)
+        return None
     except subprocess.TimeoutExpired:
         _fail(run, "breseq did not finish within %d seconds." % _timeout())
         raise
@@ -140,14 +180,13 @@ def run_breseq(run_id):
         _fail(run, "breseq could not be started: %s" % exc)
         raise
 
-    output = (completed.stdout or b"").decode("utf-8", "replace")
     run.log = run.truncated_log(output)
     run.save(update_fields=["log"])
 
-    if completed.returncode != 0:
+    if returncode != 0:
         _fail(run, "breseq exited %d. Its output is below; the run directory has been kept."
-                   % completed.returncode, log=output)
-        raise RuntimeError("breseq exited %d for run %s" % (completed.returncode, run.pk))
+                   % returncode, log=output)
+        raise RuntimeError("breseq exited %d for run %s" % (returncode, run.pk))
 
     # breseq can stop having printed an error and still exit 0 -- a missing bowtie2 does
     # exactly that -- so the returncode is not the test. What the output *is* decides.
@@ -158,7 +197,11 @@ def run_breseq(run_id):
         raise
 
     holder = "mutint_breseq run %s" % run.pk
-    _wait_for_import_lock(holder)
+    try:
+        _wait_for_import_lock(holder, run.task_result_id)
+    except jobs.JobCancelled:
+        _cancelled(run, log=output)
+        return None
     try:
         # The run directory holds exactly one sample folder, named for the sample, so
         # `find_sample_dirs` finds that one and takes its name from the basename -- which is

@@ -27,6 +27,7 @@ from aledb_experiment.permissions import (
     experiment_lock_refusal,
 )
 from aledb_import import reference_store, staging
+from aledb_jobs import jobs as jobs_api
 from aledb_import.upload_session import UploadError
 
 from mutint_breseq import runner, tasks
@@ -57,7 +58,16 @@ def _experiment_or_none(request):
 
 @ensure_csrf_cookie
 def breseq(request):
-    """The launcher: drop reads, name the sample, run breseq. Lists this experiment's runs."""
+    """The launcher: drop reads, name the sample, run breseq. Lists this experiment's runs.
+
+    Signed in first, and only then the experiment. Running breseq is creating data, so the rule
+    is the one `project_new` and `experiment_new` state: you must be somebody. It is checked
+    before the experiment is resolved, so a signed-out visitor is told the actual reason rather
+    than being sent to a page about an experiment they were never going to be able to use.
+    """
+    if not request.user.is_authenticated:
+        return render(request, "403.html", get_user_context(request.user), status=403)
+
     context = get_user_context(request.user)
     try:
         experiment = aledb_sample.views.common.get_experiment(request)
@@ -125,6 +135,9 @@ def _run_rows(experiment):
 
 def runs(request):
     """The run list as JSON, for the page's poll."""
+    if not request.user.is_authenticated:
+        return JsonResponse({"error": "You must be signed in."}, status=403)
+
     experiment = _experiment_or_none(request)
     if experiment is None:
         return JsonResponse({"error": "Unknown experiment."}, status=404)
@@ -138,8 +151,12 @@ def launch(request):
     Gated on `can_edit_experiment` and **not** `can_edit_project`: what this eventually writes
     is a sample everybody sees, so a locked experiment has to refuse it, and a predicate handed
     the project cannot see a flag on the experiment. That is the call the suite's CLAUDE.md
-    notes no plugin had yet had to make.
+    notes no plugin had yet had to make. Signed in as well, stated rather than left to be
+    inferred from three files -- see `aledb_import.staging.create_staging_session`.
     """
+    if not request.user.is_authenticated:
+        return JsonResponse({"error": "You must be signed in."}, status=403)
+
     experiment = _experiment_or_none(request)
     if experiment is None:
         return JsonResponse({"error": "Unknown experiment."}, status=404)
@@ -214,8 +231,17 @@ def launch(request):
     # run's post_delete receiver owns. Nothing is left for core's reaper to be racing.
     staging.close(session)
 
-    result = tasks.run_breseq.enqueue(run.pk)
-    run.task_result_id = str(getattr(result, "id", "") or "")
+    # Through aledb_jobs rather than `task.enqueue` directly, which is what puts the run on
+    # /jobs/ with a name and an owner and makes it stoppable. `cancellable=True` is a promise
+    # the task keeps -- see runner.run_breseq_process, which polls between slices of output.
+    job = jobs_api.enqueue(
+        tasks.run_breseq, run.pk,
+        user=request.user,
+        label="breseq \u2014 %s" % run.sample_name,
+        component=COMPONENT,
+        experiment=experiment,
+        cancellable=True)
+    run.task_result_id = job.task_result_id
     run.save(update_fields=["task_result_id"])
 
     return JsonResponse({"run_id": run.pk, "runs": _run_rows(experiment)})
@@ -251,6 +277,9 @@ def _payload(request):
 @require_POST
 def run_delete(request, pk):
     """Forget a run and remove its files. The row's post_delete receiver does the second."""
+    if not request.user.is_authenticated:
+        return JsonResponse({"error": "You must be signed in."}, status=403)
+
     run = BreseqRun.objects.filter(pk=pk).select_related("experiment").first()
     if run is None:
         return JsonResponse({"error": "Unknown run."}, status=404)
@@ -258,6 +287,16 @@ def run_delete(request, pk):
         return JsonResponse(
             {"error": experiment_lock_refusal(run.experiment)
                       or "You cannot change this experiment."}, status=403)
+
+    if not run.is_finished:
+        # Refused, because deleting is destructive in a way that is invisible from here: the
+        # post_delete receiver rmtrees the run directory, which for a *running* run pulls the
+        # reads and the output out from under the live subprocess. breseq then fails on its
+        # own, minutes later, with an error naming neither the cause nor the person who caused
+        # it. Cancelling stops it properly and leaves the row deletable.
+        return JsonResponse(
+            {"error": "That run has not finished. Cancel it on the Jobs page first, then "
+                      "delete it."}, status=409)
 
     # Deliberately does not delete the imported Sample. A run is a record of how a sample was
     # made; removing that record must not remove the data, which is deleted through the sample

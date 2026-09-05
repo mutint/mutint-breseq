@@ -18,7 +18,9 @@ from aledb_experiment.models import Experiment, Project
 from aledb_import import reference, reference_store, staging
 from aledb_import.tests import breseq_fixture
 
-from mutint_breseq.models import BreseqRun
+from mutint_breseq.models import (
+    STATUS_IMPORTED, STATUS_RUNNING, BreseqRun,
+)
 
 
 def establish_reference(experiment, sequences=None):
@@ -212,7 +214,8 @@ class RunListTestCase(TestCase):
         self.assertEqual([row["sample_name"] for row in body["runs"]], ["mine"])
 
     def test_deleting_a_run_removes_its_directory(self):
-        run = BreseqRun.objects.create(experiment=self.experiment, sample_name="s1")
+        run = BreseqRun.objects.create(experiment=self.experiment, sample_name="s1",
+                                       status=STATUS_IMPORTED)
         directory = store.ensure_dir(run.directory())
         with open(os.path.join(directory, "kept"), "w") as handle:
             handle.write("x")
@@ -224,14 +227,28 @@ class RunListTestCase(TestCase):
         # nothing under components/.
         self.assertFalse(os.path.exists(directory))
 
+    def test_an_unfinished_run_cannot_be_deleted(self):
+        # The post_delete receiver rmtrees the run directory, which for a running run pulls
+        # the reads out from under the live subprocess -- breseq then fails minutes later with
+        # an error naming neither cause nor culprit. Cancelling is the way to stop it.
+        run = BreseqRun.objects.create(experiment=self.experiment, sample_name="s1",
+                                       status=STATUS_RUNNING)
+        response = self.client.post("/breseq/run/%d/delete" % run.pk)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Cancel it", response.json()["error"])
+        self.assertTrue(BreseqRun.objects.filter(pk=run.pk).exists())
+
     def test_deleting_the_experiment_takes_the_run_directory_with_it(self):
+        # Deleting the *experiment* is not gated on the run being finished: cascade is not the
+        # delete button, and an experiment being removed is a decision about the whole dataset.
         run = BreseqRun.objects.create(experiment=self.experiment, sample_name="s1")
         directory = store.ensure_dir(run.directory())
         self.experiment.delete()
         self.assertFalse(os.path.exists(directory))
 
     def test_a_reader_cannot_delete_a_run(self):
-        run = BreseqRun.objects.create(experiment=self.experiment, sample_name="s1")
+        run = BreseqRun.objects.create(experiment=self.experiment, sample_name="s1",
+                                       status=STATUS_IMPORTED)
         reader = User.objects.create(username="reader", email="r@e.com", is_active=True)
         from aledb_experiment.permissions import grant_project_access
         grant_project_access(self.project, reader, "read")

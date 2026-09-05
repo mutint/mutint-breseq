@@ -32,18 +32,24 @@ STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
 STATUS_IMPORTED = "imported"
 STATUS_FAILED = "failed"
+STATUS_CANCELLED = "cancelled"
 
 STATUS_CHOICES = [
     (STATUS_QUEUED, "Queued"),
     (STATUS_RUNNING, "Running"),
     (STATUS_IMPORTED, "Imported"),
     (STATUS_FAILED, "Failed"),
+    (STATUS_CANCELLED, "Cancelled"),
 ]
 
-# There is no `cancelled`. Nothing here can stop a running breseq: the process belongs to the
-# worker, and a status the product cannot enforce is a button that lies.
+# `cancelled` was once absent, with a note saying nothing here could stop a running breseq
+# because the process belongs to the worker -- and a status the product cannot enforce is a
+# button that lies. That was true of the *queue*, which still offers no way to interrupt a
+# running task, and it stopped being true of this plugin when the run loop began asking. The
+# task stops itself; see runner.run_breseq_process. Keep the two joined: if the polling ever
+# goes, so must this status.
 
-FINISHED_STATUSES = (STATUS_IMPORTED, STATUS_FAILED)
+FINISHED_STATUSES = (STATUS_IMPORTED, STATUS_FAILED, STATUS_CANCELLED)
 
 # breseq's output is verbose and its tail is the part that says what went wrong. Kept on the
 # row rather than in a file so it survives the directory being cleaned up after a success.

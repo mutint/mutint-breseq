@@ -20,7 +20,9 @@ SCRIPT = textwrap.dedent('''\
     import json
     import os
     import shutil
+    import subprocess
     import sys
+    import time
 
     argv = sys.argv[1:]
     template = os.environ["FAKE_BRESEQ_TEMPLATE"]
@@ -28,6 +30,17 @@ SCRIPT = textwrap.dedent('''\
 
     with open(record, "w") as handle:
         json.dump({"argv": argv, "path": os.environ.get("PATH", "")}, handle)
+
+    # A run that does not return, for the cancellation tests. It spawns a child first and
+    # writes both pids out, because killing only the parent is the mistake this is here to
+    # catch: breseq spawns bowtie2 and samtools, and `process.kill()` would leave them
+    # running while the job reported itself stopped.
+    if os.environ.get("FAKE_BRESEQ_SLEEP"):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+        with open(os.environ["FAKE_BRESEQ_PIDS"], "w") as handle:
+            json.dump({"parent": os.getpid(), "child": child.pid}, handle)
+        time.sleep(600)
+        sys.exit(0)
 
     if os.environ.get("FAKE_BRESEQ_FAIL"):
         sys.stderr.write("breseq: something went wrong\\n")

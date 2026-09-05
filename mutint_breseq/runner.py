@@ -9,10 +9,26 @@ tested without running breseq at all.
 import os
 import shlex
 import shutil
+import signal
+import subprocess
+import time
 
 from aledb_common import tools
 
 BRESEQ = "breseq"
+
+# How often the run loop asks whether somebody has cancelled. One indexed read against a
+# unique column, against a subprocess measured in hours -- the interval is about how long a
+# person waits after pressing the button, not about cost.
+CANCEL_POLL_SECONDS = 2
+
+# Between asking the process group to stop and insisting. breseq traps nothing, so this is
+# only ever the time bowtie2 or samtools take to notice; it is not a shutdown protocol.
+KILL_GRACE_SECONDS = 10
+
+
+class Cancelled(Exception):
+    """The run was stopped because somebody asked it to."""
 
 # breseq's own spelling of "how many processors", both forms. Matched so that a `-j` typed in
 # the arguments box wins over the default below rather than being handed to breseq twice --
@@ -103,6 +119,69 @@ def tool_environment(env=None):
 def breseq_path():
     """Absolute path to breseq, or ToolMissing naming what installs it."""
     return tools.require(BRESEQ)
+
+
+def run_breseq_process(argv, env, timeout, is_cancelled=None,
+                       poll_seconds=CANCEL_POLL_SECONDS):
+    """Run breseq, watching for cancellation. Returns (returncode, combined output).
+
+    `subprocess.run` cannot do this: it blocks until the process exits, so there is no moment
+    at which anything could be asked whether the job is still wanted. The loop is the whole
+    difference, and it is why cancellation is possible at all -- `django_tasks_db` offers no
+    way to interrupt a running task, so the task has to interrupt itself.
+
+    Raises `Cancelled` after stopping the process, or `subprocess.TimeoutExpired`.
+
+    **`start_new_session=True`, and the signal goes to the process group.** This is the part
+    that is easy to get wrong and looks correct when it is: breseq spawns bowtie2 and samtools
+    as children, so `process.kill()` reaps the parent and leaves them running with no parent
+    at all. The job would report itself cancelled while the machine stayed saturated, which is
+    worse than not offering the button. A new session makes the whole run one process group
+    with one thing to signal.
+    """
+    process = subprocess.Popen(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+        start_new_session=True)
+
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                output, _ = process.communicate(timeout=poll_seconds)
+                return process.returncode, (output or b"").decode("utf-8", "replace")
+            except subprocess.TimeoutExpired:
+                pass
+
+            if is_cancelled is not None and is_cancelled():
+                _stop(process)
+                raise Cancelled("breseq was cancelled.")
+
+            if time.monotonic() >= deadline:
+                _stop(process)
+                raise subprocess.TimeoutExpired(argv, timeout)
+    finally:
+        # communicate() on the way out, or the pipe is left open and the child can block
+        # writing to a buffer nobody drains.
+        if process.poll() is None:
+            _stop(process)
+        try:
+            process.communicate(timeout=KILL_GRACE_SECONDS)
+        except Exception:
+            pass
+
+
+def _stop(process):
+    """SIGTERM the whole process group, then SIGKILL what is left."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(os.getpgid(process.pid), sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            return
+        try:
+            process.wait(timeout=KILL_GRACE_SECONDS)
+            return
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def check_output(output_dir):

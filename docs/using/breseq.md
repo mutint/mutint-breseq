@@ -7,6 +7,10 @@ landing directly in the experiment.
 
 ## Before you can use it
 
+**You must be signed in.** Running breseq creates data, so the rule is the same one that
+governs creating a project or an experiment. Signed out, the page explains itself and offers
+no form.
+
 **The experiment needs a reference genome.** breseq calls mutations against one, so without it
 there is nothing to run and the page says so instead of offering the form. Establish one by
 dropping a GenBank, GFF3 or FASTA on the experiment's **Add data** page.
@@ -77,6 +81,24 @@ The run list under the form updates itself while anything is in flight:
 - **Imported** — done, with links to the sample's **Mutations** and to breseq's own report.
 - **Failed** — with the reason, and breseq's output behind a fold.
 
+## Stopping a run
+
+Every run appears on the **Jobs** page, reached from your username in the sidebar. While it is
+queued or running there is a **Cancel** button.
+
+Cancelling a run that has already started stops breseq and everything it launched — bowtie2
+and samtools included — and it is not instant: the run checks between slices of work, so there
+is a second or two before it notices. The page says *stopping…* meanwhile.
+
+**A cancelled run keeps nothing.** The reads and the partial breseq output are deleted, which
+is the one way cancelling differs from failing: a failed run is something to look at, and a
+cancelled one is something you decided you did not want. Relaunching means uploading the reads
+again.
+
+A run that is still queued or running **cannot be deleted** — cancel it first. Deleting it
+would pull the reads out from under breseq while it was reading them, and the failure that
+followed would name neither the cause nor the person who caused it.
+
 ## What is kept
 
 After a successful import, **breseq's HTML report is kept and everything else is deleted** —
@@ -95,7 +117,5 @@ remove the data. Delete the sample itself from the mutation editor if that is wh
 
 - **It does not analyse several samples at once.** One launch is one sample; launch again for
   the next. Several launches queue and run in order.
-- **It cannot be cancelled.** The process belongs to the worker; stopping the worker is what
-  stops a run, and it will be re-attempted.
 - **It does not choose the reference.** Every run uses the experiment's own, which is what
   makes the resulting samples comparable with everything else in it.
