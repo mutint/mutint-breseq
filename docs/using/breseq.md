@@ -90,6 +90,10 @@ Cancelling a run that has already started stops breseq and everything it launche
 and samtools included — and it is not instant: the run checks between slices of work, so there
 is a second or two before it notices. The page says *stopping…* meanwhile.
 
+breseq's own HTML report is kept for the sample the run produced, and is reached from that
+sample's mutations page rather than from here — see *Reading breseq's report*. Deleting a run
+does not take it away, because it belongs to the sample.
+
 **A cancelled run keeps nothing.** The reads and the partial breseq output are deleted, which
 is the one way cancelling differs from failing: a failed run is something to look at, and a
 cancelled one is something you decided you did not want. Relaunching means uploading the reads
@@ -101,8 +105,8 @@ followed would name neither the cause nor the person who caused it.
 
 ## What is kept
 
-After a successful import, **breseq's HTML report is kept and everything else is deleted** —
-the reads and breseq's working data. That is not a loss: the mutations, the alignment and the
+After a successful import, **the run directory is emptied** — the reads and breseq's working
+data go, and breseq's HTML report has already been stored under the sample. That is not a loss: the mutations, the alignment and the
 reference are all in the store under the sample by then, which is what the mutation tables and
 the genome browser read.
 

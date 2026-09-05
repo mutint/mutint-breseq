@@ -127,8 +127,11 @@ def _run_rows(experiment):
             "error": run.error,
             "log": run.log,
             "sample_id": run.sample_id,
-            "report_url": ("/breseq/run/%d/report/index.html" % run.pk
-                           if run.report_stored else None),
+            # Core's viewer for the sample this run produced, not a route of our own. The
+            # report is stored under the sample by aledb-core's importer, so the link exists
+            # exactly when the sample does.
+            "report_url": ("/mutations/report/%d/" % run.sample_id
+                           if run.sample_id else None),
         })
     return rows
 
@@ -304,27 +307,3 @@ def run_delete(request, pk):
     experiment = run.experiment
     run.delete()
     return JsonResponse({"deleted": True, "runs": _run_rows(experiment)})
-
-
-def report(request, pk, path):
-    """Serve one file from a run's kept breseq report.
-
-    The only route here that takes a client-supplied path, so it is the only one that has to
-    contain it: `realpath` must land inside the run's own report directory. Same shape as
-    `upload_session.staged_path`, and for the same reason -- a `..` that got through would
-    read any file the server can.
-
-    Gated on `can_view_project` rather than `can_edit_experiment`: reading a report is reading.
-    """
-    run = BreseqRun.objects.filter(pk=pk).select_related("experiment").first()
-    if run is None or not run.report_stored:
-        raise Http404("No report for that run.")
-    if not can_view_project(request.user, run.experiment.project):
-        raise Http404("No report for that run.")
-
-    root = os.path.realpath(run.report_dir())
-    candidate = os.path.realpath(os.path.join(root, path))
-    if candidate != root and not candidate.startswith(root + os.sep):
-        raise Http404("No such file.")
-
-    return serve_file(request, candidate, os.path.basename(candidate))

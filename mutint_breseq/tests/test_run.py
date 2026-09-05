@@ -1,4 +1,4 @@
-"""The whole path: drop reads, run breseq, import what it made, keep the report.
+"""The whole path: drop reads, run breseq, import what it made.
 
 `aledb_common.test_runner` forces `django.tasks` to its immediate backend, so `.enqueue()`
 runs inline and one POST exercises launch, the subprocess, the ingest and the cleanup. That is
@@ -133,14 +133,22 @@ class RunTestCase(TestCase):
         self.assertTrue(
             self._recorded_argv()["path"].startswith(os.path.join(self.tools, "bin")))
 
-    def test_the_reads_go_and_the_report_stays(self):
+    def test_the_run_directory_is_emptied_and_the_report_is_on_the_sample(self):
+        """The report belongs to the sample, not to the run that produced it.
+
+        aledb-core's importer stores breseq's `output/` under the sample's own primary key,
+        so nothing is left here -- and the report outlives this row, which is the point.
+        """
         response = self._launch()
         run = BreseqRun.objects.get(pk=response.json()["run_id"])
 
-        self.assertTrue(run.report_stored)
-        self.assertTrue(os.path.isfile(os.path.join(run.report_dir(), "index.html")))
         self.assertFalse(os.path.exists(run.reads_dir()), "the reads were kept")
-        self.assertFalse(os.path.exists(run.output_dir()), "breseq's data/ was kept")
+        self.assertFalse(os.path.exists(run.output_dir()), "breseq's output was kept")
+
+        from aledb_common import store as core_store
+        self.assertTrue(run.sample.report_stored)
+        self.assertTrue(os.path.isfile(
+            os.path.join(core_store.sample_report_dir(run.sample_id), "index.html")))
 
     def test_the_staging_area_is_released(self):
         response = self._launch()
@@ -159,42 +167,28 @@ class RunTestCase(TestCase):
         self.assertEqual(run.read_files, ["L1__r.fastq", "L2__r.fastq"])
         self.assertEqual(run.status, STATUS_IMPORTED, run.error)
 
-    # --- the report -----------------------------------------------------------------------
+    # --- the report, which core owns ------------------------------------------------------
 
-    def test_the_report_is_served(self):
-        run = BreseqRun.objects.get(pk=self._launch().json()["run_id"])
-        response = self.client.get("/breseq/run/%d/report/index.html" % run.pk)
-        self.assertEqual(response.status_code, 200)
-        self.assertIn(b"fake breseq report", b"".join(response.streaming_content))
+    def test_the_run_list_links_to_cores_viewer(self):
+        """No route of our own any more.
 
-    def test_nested_report_pages_are_served(self):
-        # index.html links to them; keeping only the top would give a report whose links 404.
-        run = BreseqRun.objects.get(pk=self._launch().json()["run_id"])
+        The plugin used to serve the report itself at /breseq/run/<pk>/report/<path>. That is
+        gone: aledb-core keeps it under the sample and serves it sandboxed, and this links
+        there. Containment and the sandbox are tested where they live, in
+        `aledb_sample/tests/test_report.py`.
+        """
+        response = self._launch()
+        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+
+        rows = self.client.get("/breseq/runs?experiment_id=%s" % self.experiment.id).json()
+        row = [r for r in rows["runs"] if r["id"] == run.pk][0]
+        self.assertEqual("/mutations/report/%d/" % run.sample_id, row["report_url"])
+
+    def test_the_old_plugin_route_is_gone(self):
+        response = self._launch()
+        run = BreseqRun.objects.get(pk=response.json()["run_id"])
         self.assertEqual(
-            self.client.get("/breseq/run/%d/report/evidence/e.html" % run.pk).status_code, 200)
-
-    def test_the_report_path_is_contained(self):
-        run = BreseqRun.objects.get(pk=self._launch().json()["run_id"])
-        for bad in ("../../../etc/passwd", "..%2f..%2fetc%2fpasswd", "evidence/../../../x"):
-            self.assertEqual(
-                self.client.get("/breseq/run/%d/report/%s" % (run.pk, bad)).status_code, 404,
-                "served %r" % (bad,))
-
-    def test_a_reader_may_see_the_report(self):
-        run = BreseqRun.objects.get(pk=self._launch().json()["run_id"])
-        reader = User.objects.create(username="reader", email="r@e.com", is_active=True)
-        from aledb_experiment.permissions import grant_project_access
-        grant_project_access(self.project, reader, "read")
-        self.client.force_login(reader)
-        self.assertEqual(
-            self.client.get("/breseq/run/%d/report/index.html" % run.pk).status_code, 200)
-
-    def test_somebody_with_no_access_may_not(self):
-        run = BreseqRun.objects.get(pk=self._launch().json()["run_id"])
-        stranger = User.objects.create(username="stranger", email="s@e.com", is_active=True)
-        self.client.force_login(stranger)
-        self.assertEqual(
-            self.client.get("/breseq/run/%d/report/index.html" % run.pk).status_code, 404)
+            404, self.client.get("/breseq/run/%d/report/index.html" % run.pk).status_code)
 
     # --- failure --------------------------------------------------------------------------
 

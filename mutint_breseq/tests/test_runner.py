@@ -128,19 +128,20 @@ class CleanupTestCase(SimpleTestCase):
             with open(path, "w") as handle:
                 handle.write("x")
 
-    def test_the_report_is_kept_and_everything_else_goes(self):
-        kept = runner.cleanup_after_import(self.run_dir, self.output_dir, self.report_dir)
-        self.assertTrue(kept)
-        self.assertTrue(os.path.isfile(os.path.join(self.report_dir, "index.html")))
-        # Nested pages too -- index.html links to them, so keeping only the top would give a
-        # report whose every link 404s.
-        self.assertTrue(os.path.isfile(
-            os.path.join(self.report_dir, "evidence", "e.html")))
+    def test_everything_is_thrown_away(self):
+        """The importer has already kept what matters, under the sample.
+
+        This used to move `output/` aside into a `report/` of its own and return whether it
+        had -- two homes for the same bytes, and the wrong one: a report describes the sample
+        that was produced, and the sample outlives the run row. aledb-core stores it now.
+        """
+        runner.cleanup_after_import(self.run_dir, self.output_dir)
+
         self.assertFalse(os.path.exists(os.path.join(self.run_dir, "reads")))
         self.assertFalse(os.path.exists(self.output_dir))
 
-    def test_no_report_is_not_a_failure(self):
-        shutil.rmtree(os.path.join(self.output_dir, "output"))
-        self.assertFalse(
-            runner.cleanup_after_import(self.run_dir, self.output_dir, self.report_dir))
+    def test_a_run_with_no_output_directory_is_fine(self):
+        shutil.rmtree(self.output_dir)
+        runner.cleanup_after_import(self.run_dir, self.output_dir)
+        self.assertFalse(os.path.exists(os.path.join(self.run_dir, "reads")))
         self.assertFalse(os.path.exists(self.output_dir))

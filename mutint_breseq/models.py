@@ -90,11 +90,13 @@ class BreseqRun(models.Model):
     # The sample the import produced. SET_NULL because deleting the sample -- through the
     # sample editor, or by re-importing over it -- must not delete the record of the run that
     # made it; the row then says what happened and no longer points anywhere.
+    #
+    # It is also where breseq's HTML report went. This model carried a `report_stored` flag
+    # and a `report/` directory of its own, and both are gone: aledb-core keeps the report
+    # under the *sample*, which is where it belongs -- a report describes the sample that was
+    # produced, and the sample outlives this row.
     sample = models.ForeignKey("aledb_sample.Sample", null=True, blank=True,
                                on_delete=models.SET_NULL, related_name="breseq_runs")
-    # Whether `report/` holds breseq's own HTML. False for a run that failed before writing
-    # one, and for a successful run whose output was later removed by hand.
-    report_stored = models.BooleanField(default=False)
 
     class Meta:
         ordering = ["-created_at"]
@@ -122,10 +124,6 @@ class BreseqRun(models.Model):
         second rule about what a sample is called.
         """
         return os.path.join(self.directory(), self.sample_name)
-
-    def report_dir(self):
-        """Where breseq's own HTML is kept after a successful import."""
-        return os.path.join(self.directory(), "report")
 
     def truncated_log(self, text):
         if len(text) <= MAX_LOG_CHARS:

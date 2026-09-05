@@ -221,14 +221,15 @@ def run_breseq(run_id):
         raise RuntimeError("import refused run %s: %s" % (run.pk, entry["error"]))
 
     sample = _imported_sample(experiment, run.sample_name)
-    kept = runner.cleanup_after_import(run.directory(), run.output_dir(), run.report_dir())
+    # Everything worth keeping -- data/'s four files and breseq's HTML report -- is already in
+    # the store under the sample, put there by the importer above.
+    runner.cleanup_after_import(run.directory(), run.output_dir())
 
     run.status = STATUS_IMPORTED
     run.sample = sample
-    run.report_stored = kept
     run.finished_at = timezone.now()
     run.error = ""
-    run.save(update_fields=["status", "sample", "report_stored", "finished_at", "error"])
+    run.save(update_fields=["status", "sample", "finished_at", "error"])
     logger.info("breseq run %s imported %s mutations as sample %s",
                 run.pk, entry.get("mutations"), getattr(sample, "pk", None))
     return entry.get("mutations")

@@ -49,8 +49,6 @@ REQUIRED_OUTPUT = (
     os.path.join("data", "reference.bam.bai"),
 )
 
-# breseq's own HTML report, the one thing kept after a successful import.
-REPORT_SUBDIR = "output"
 
 
 class BreseqUnusable(Exception):
@@ -199,24 +197,18 @@ def check_output(output_dir):
                 % relative)
 
 
-def cleanup_after_import(run_dir, output_dir, report_dir):
-    """Keep breseq's HTML report, throw the rest away. Returns whether a report was kept.
+def cleanup_after_import(run_dir, output_dir):
+    """Throw the whole run away. The importer has already kept everything worth keeping.
 
-    What is deleted is the reads -- much the largest part -- and `data/`, whose four files the
-    importer has just copied into the store under the sample's own primary key. Keeping a
-    second copy of a BAM per run would double the store for nothing.
+    That is `data/`'s four files **and breseq's HTML report**, both copied into the store
+    under the sample's own primary key by `aledb_import.breseq_folder`. This used to move
+    `output/` aside into a `report/` of its own and serve it from here, which made two homes
+    for the same bytes -- and the wrong one, because a report is a property of the *sample*
+    that was produced and a sample outlives the run row that made it.
 
-    Deliberately not `shutil.rmtree(run_dir)` after moving the report out: a run directory
-    holds only what this plugin put there, but a rule that deletes a whole tree should name
-    what it expects to find rather than trusting that.
+    Deliberately not `shutil.rmtree(run_dir)`: a run directory holds only what this plugin put
+    there, but a rule that deletes a whole tree should name what it expects to find rather
+    than trusting that.
     """
-    kept = False
-    source = os.path.join(output_dir, REPORT_SUBDIR)
-    if os.path.isdir(source):
-        shutil.rmtree(report_dir, ignore_errors=True)
-        shutil.move(source, report_dir)
-        kept = True
-
     shutil.rmtree(os.path.join(run_dir, "reads"), ignore_errors=True)
     shutil.rmtree(output_dir, ignore_errors=True)
-    return kept

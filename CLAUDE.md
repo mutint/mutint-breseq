@@ -32,7 +32,7 @@ a project's `.gitmodules` is how a component is not installed.
 |---|---|
 | `runner.py` | pure: the argv, the PATH, what counts as usable output, what to keep |
 | `tasks.py` | the `@task` — run breseq, check, import, clean up |
-| `views.py` | the page, the launch endpoint, the run list, serving the report |
+| `views.py` | the page, the launch endpoint, the run list |
 | `models.py` | `BreseqRun`, and the receiver that owns its directory |
 
 `runner.py` is pure on purpose, in the shape `aledb_sample/locus.py` is: the two rules most
@@ -151,6 +151,22 @@ queue, and the page says *waiting for a worker* when the answer is that nothing 
 up. Running no worker is this feature's easiest failure by a distance and the one a person is
 least equipped to guess at; it is worth a column.
 
+### The report is the sample's, not the run's
+
+This plugin used to keep breseq's `output/` in a `report/` of its own and serve it at
+`/breseq/run/<pk>/report/<path>`. Both are gone. **aledb-core keeps the report under the
+sample** -- `breseq_folder._store_report` into `store.sample_report_dir` -- and serves it
+sandboxed at `/mutations/report/<sample_id>/`, so the run list simply links there.
+
+Two reasons, and the second is the real one. Two homes for the same bytes is one; and a report
+describes *the sample that was produced*, which outlives this row -- deleting a run must not
+take away the evidence behind mutations that are still in the database. It also means a sample
+uploaded as a breseq folder on the Add page has a report on exactly the same terms, which it
+could never have had while this plugin owned the serving.
+
+`cleanup_after_import` therefore deletes everything now and returns nothing; the importer has
+already kept what matters by the time it runs.
+
 ### The run directory is this plugin's to delete
 
 `store.component_dir("mutint_breseq", pk)` is core's path builder and **core reaps nothing
@@ -196,7 +212,7 @@ cd mutint && ./mutint test mutint_breseq
 
 There is no way to run them from aledb-core: the plugin is not installed there.
 
-**62 tests**, and the end-to-end ones are affordable because of two things. The test runner
+**59 tests**, and the end-to-end ones are affordable because of two things. The test runner
 forces `django.tasks` to its immediate backend, so `.enqueue()` runs inline and one POST
 exercises launch, the subprocess, the ingest and the cleanup. And `tests/fake_breseq.py` is a
 **real executable on disk** rather than a `subprocess.run` patch — the two things most likely
