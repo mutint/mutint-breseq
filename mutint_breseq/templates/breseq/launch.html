@@ -1,12 +1,17 @@
 {% extends 'base.html' %}
+{% load import_tabs %}
 
 {% block title %}Run breseq — {{ experiment.name }}{% endblock %}
 
 {% block header %}
-    <b>{{ experiment.name }}</b> &mdash; Run breseq
+    <b>{{ experiment.name }}</b> &mdash; Import data
 {% endblock %}
 
 {% block content %}
+{% comment %} This page is the Run breseq tab of the Import data page, so it wears the same
+   strip core's type tabs do, at the row's full width -- see
+   mutint_common.import_tab_registry. {% endcomment %}
+<div class="col-lg-12">{% import_tabs 'run_breseq' %}</div>
 <div class="col-lg-10">
 
 {% if not has_reference %}
@@ -14,8 +19,8 @@
         <b>This experiment has no reference genome yet.</b>
         breseq calls mutations against one, so there is nothing to run yet. Establish a
         reference first &mdash; drop a GenBank, GFF3 or FASTA on the
-        <a href="/import/add/?experiment_id={{ experiment_id }}">Add data</a> page &mdash; and
-        this page will offer the form.
+        <a href="/import/?experiment_id={{ experiment_id }}&amp;type=reference">Reference Sequence</a>
+        tab &mdash; and this tab will offer the form.
     </div>
 {% elif not can_launch %}
     <div class="alert alert-warning">

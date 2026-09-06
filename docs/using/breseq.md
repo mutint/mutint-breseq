@@ -1,6 +1,6 @@
 # Running breseq
 
-**Run breseq** in an experiment's sidebar takes FASTQ read files, runs breseq on them against
+The **Run breseq** tab of an experiment's Import data page takes FASTQ read files, runs breseq on them against
 that experiment's reference genome, and imports the result as a sample. It is the same
 analysis you would run at a terminal and then upload as a folder — done here, with the result
 landing directly in the experiment.
@@ -13,7 +13,7 @@ no form.
 
 **The experiment needs a reference genome.** breseq calls mutations against one, so without it
 there is nothing to run and the page says so instead of offering the form. Establish one by
-dropping a GenBank, GFF3 or FASTA on the experiment's **Add data** page.
+dropping a GenBank, GFF3 or FASTA on the **Reference Sequence** tab of the experiment's Import data page.
 
 **A worker has to be running.** The analysis takes hours, so it does not happen inside the web
 request — it is queued, and `./mutint db_worker` is what picks it up. Nothing starts one for
@@ -31,7 +31,7 @@ breseq, and every run fails identically.
 
 ## Launching a run
 
-1. Open **Run breseq** with an experiment selected.
+1. Open the experiment's **Import data** page and choose the **Run breseq** tab.
 2. Type a **sample name**. This is what the sample is called everywhere in MutInt.
 3. Optionally type **breseq arguments**, and untick **Trim reads with fastp first** if you do
    not want the reads trimmed.

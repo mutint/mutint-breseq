@@ -7,16 +7,19 @@ class BreseqConfig(AppConfig):
     def ready(self):
         from django.urls import re_path, include
         from mutint_common.about_registry import register_about_section
-        from mutint_common.nav_registry import EXPERIMENT_SECTION, register_nav_item
+        from mutint_common.import_tab_registry import register_import_tab
         from mutint_common.plugin_registry import register_plugin_urlpatterns
 
         register_plugin_urlpatterns([
             re_path(r'^breseq/', include('mutint_breseq.urls')),
         ])
-        # url_name rather than a literal path, as mutint-phylogeny and mutint-compare do:
-        # nav_registry skips an entry whose name will not reverse, so a half-installed plugin
-        # cannot leave a dead link in the sidebar.
-        register_nav_item('Run breseq', url_name='breseq', section=EXPERIMENT_SECTION)
+        # A tab on the Import data page rather than a sidebar entry: running breseq is one
+        # more way of getting a sample into an experiment, and it belongs beside the others.
+        # The tab is this plugin's own page, which wears the same strip -- a type tab could
+        # not carry the sample name and command line the launcher needs (see below). By
+        # url_name: the registry skips a tab whose name will not reverse, so a half-installed
+        # plugin cannot leave a dead tab.
+        register_import_tab('run_breseq', 'Run breseq', url_name='breseq')
         register_about_section(self, name='mutint-breseq',
                                template='about/sections/mutint_breseq.html')
 
@@ -33,7 +36,7 @@ class BreseqConfig(AppConfig):
         # **No import handler**, which is the one worth explaining because it looks like the
         # obvious way to build this. A FASTQ drop needs a sample name and a command line, and
         # `handle(experiment, staged_root, paths, user)` can carry neither -- so registering
-        # would put an entry in the Add page's dropdown that cannot carry what the entry needs.
+        # would put a tab on the Import data page that cannot carry what the tab needs.
         # The upload machinery is still core's: see `mutint_import.staging`, which exists for
         # exactly this and was added with this plugin.
         #
