@@ -9,9 +9,17 @@ class Migration(migrations.Migration):
 
     initial = True
 
+    # `__first__` rather than a migration name: this plugin is a separate repository, and
+    # mutint-core is free to renumber, squash or collapse its own history without knowing
+    # this file exists. The models named below are created in their app's *first* migration,
+    # which is all a foreign key to them needs -- mutint_experiment's later migrations only
+    # add fields and constraints to core's own tables.
+    #
+    # `makemigrations` emits concrete names and will never emit this; regenerating this file
+    # reverts the sentinel silently. Re-apply it when you do.
     dependencies = [
-        ('mutint_experiment', '0002_initial'),
-        ('mutint_sample', '0001_initial'),
+        ('mutint_experiment', '__first__'),
+        ('mutint_sample', '__first__'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
