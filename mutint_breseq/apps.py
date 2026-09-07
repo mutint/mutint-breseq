@@ -9,6 +9,7 @@ class BreseqConfig(AppConfig):
         from mutint_common.about_registry import register_about_section
         from mutint_common.import_tab_registry import register_import_tab
         from mutint_common.plugin_registry import register_plugin_urlpatterns
+        from mutint_breseq.version import __version__
 
         register_plugin_urlpatterns([
             re_path(r'^breseq/', include('mutint_breseq.urls')),
@@ -20,7 +21,7 @@ class BreseqConfig(AppConfig):
         # url_name: the registry skips a tab whose name will not reverse, so a half-installed
         # plugin cannot leave a dead tab.
         register_import_tab('run_breseq', 'Run breseq', url_name='breseq')
-        register_about_section(self, name='mutint-breseq',
+        register_about_section(self, name='mutint-breseq', version=__version__,
                                template='about/sections/mutint_breseq.html')
 
         # Nothing else is registered, and each absence is a decision:
