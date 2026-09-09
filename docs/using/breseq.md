@@ -94,6 +94,31 @@ through as well. Compression is untouched: a gzipped file comes out gzipped.
 If fastp fails the run fails, with fastp's output in the log, rather than quietly running breseq
 on the untrimmed reads. Untick the box to skip trimming altogether.
 
+## Naming the sample
+
+Four boxes, and they are one thing seen two ways. **Full Name** is what the sample is called
+everywhere in MutInt; **Population**, **Time point** and **Sample** are the parts of it. Type a
+name and it is split into the three; fill the three and the name is built. Population and Time
+point offer the values this experiment already uses, and take a new one just as readily.
+
+Leave Population and Time point empty and the sample is filed under **Unspecified** with no
+time point — fine for a one-off, and worth avoiding for a series you will want to plot against
+time. A name carries a population and a time point together or neither: there is no way to
+write one without the other.
+
+If the coordinate matches a sample already in the experiment, the page says so before you
+launch. That is a warning and not a refusal: importing a sample that already exists **replaces
+its mutations** — the old calls are cleared and the new ones written — which is exactly what
+you want when you are re-running breseq on the same reads with better options. Nothing else
+about the sample changes, and no second sample appears.
+
+Launching again for a sample whose run is still queued or running **stops the earlier run**.
+Its output was about to be overwritten by yours, so finishing it would be hours of computer
+time spent on something thrown away.
+
+After a launch the files clear and everything else stays, so the next sample in a batch is
+usually one box to edit.
+
 ## If breseq will not accept your options
 
 The box is handed to breseq before anything else happens, and breseq is asked whether it would

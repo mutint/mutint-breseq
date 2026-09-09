@@ -83,10 +83,13 @@ class RunTestCase(TestCase):
                 handle.write(content)
         return session
 
-    def _launch(self, sample_name="s1", arguments="", names=("s1_R1.fastq", "s1_R2.fastq"),
-                trim_reads=None, content="ACGT"):
+    def _launch(self, sample="s1", population="", time_point="", arguments="",
+                names=("s1_R1.fastq", "s1_R2.fastq"), trim_reads=None, content="ACGT"):
+        """The endpoint takes the three parts of a coordinate, not a joined name: the server
+        composes. `sample` alone is the unplaced case, which is what most of these want."""
         session = self._stage(names, content=content)
-        body = {"upload_id": str(session.id), "sample_name": sample_name,
+        body = {"upload_id": str(session.id), "sample": sample,
+                "population": population, "time_point": time_point,
                 "arguments": arguments}
         if trim_reads is not None:
             body["trim_reads"] = trim_reads
@@ -257,15 +260,28 @@ class RunTestCase(TestCase):
         # And the alignment was stored, which is what the genome browser needs.
         self.assertTrue(Sample.objects.get(pk=run.sample_id).bam_stored)
 
-    def test_the_sample_is_named_from_the_box(self):
+    def test_the_sample_is_named_from_the_boxes(self):
         # Not from the read filenames. The whole reason this page exists rather than an
         # import handler is that the name is the person's to choose.
-        self._launch(sample_name="Ara-2_500gen_763A", names=("weird_name_R1.fastq",))
+        self._launch(population="Ara-2", time_point="500", sample="763A",
+                     names=("weird_name_R1.fastq",))
         run = BreseqRun.objects.get()
-        self.assertEqual(run.sample.source_name, "Ara-2_500gen_763A")
-        # And that shape places the sample on its ALE, which is what makes it worth allowing.
+        # The server composed it -- the form sent three parts, not this string.
+        self.assertEqual(run.sample.source_name, "Ara-2_500_763A")
+        # And the composed name places the sample, which is the point of composing one that
+        # `parse_sample_identity` can read back.
         self.assertEqual(run.sample.population.name, "Ara-2")
         self.assertEqual(run.sample.time_point, 500)
+
+    def test_a_sample_with_no_coordinate_is_filed_under_unspecified(self):
+        """Leaving the population and time point empty is the unplaced case, and it says so
+        rather than inventing population 1 at time point 1."""
+        self._launch(sample="my_clone", names=("weird_name_R1.fastq",))
+        run = BreseqRun.objects.get()
+
+        self.assertEqual(run.sample.source_name, "my_clone")
+        self.assertEqual(run.sample.population.name, "Unspecified")
+        self.assertIsNone(run.sample.time_point)
 
     def test_the_reads_reach_breseq_as_positional_arguments(self):
         self._launch(names=("s1_R1.fastq", "s1_R2.fastq"))

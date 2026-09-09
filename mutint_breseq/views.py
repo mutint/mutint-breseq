@@ -29,7 +29,7 @@ from mutint_experiment.permissions import (
     experiment_lock_refusal,
 )
 from mutint_common.tools import ToolMissing
-from mutint_import import reference_store, staging
+from mutint_import import reference_store, sample_names, staging
 from mutint_jobs import jobs as jobs_api
 from mutint_jobs import processes
 from mutint_import.upload_session import UploadError
@@ -38,6 +38,7 @@ from mutint_breseq import runner, tasks
 from mutint_breseq.models import (
     COMPONENT,
     STATUS_QUEUED,
+    STATUS_RUNNING,
     BreseqRun,
 )
 
@@ -93,8 +94,71 @@ def breseq(request):
         "lock_refusal": experiment_lock_refusal(experiment),
         "component": COMPONENT,
         "runs": _run_rows(experiment),
+        # What the Population and Time point boxes offer. Put in the context rather than
+        # fetched, which is what every other picker in the suite does -- and these change
+        # only when a sample is imported, which reloads the page anyway.
+        "population_names": mutint_sample.views.common.get_population_names(experiment.id),
+        "time_points": mutint_sample.views.common.get_time_points(experiment.id),
+        # For the "this replaces an existing sample" warning; see `_existing_samples`.
+        "existing_samples": _existing_samples(experiment),
     })
     return render(request, "breseq/launch.html", context)
+
+
+def _supersede_in_flight(experiment, sample_name, user):
+    """Stop any run already queued or running for this sample. Returns how many were stopped.
+
+    Two runs writing one sample race, and the loser is whichever finishes first: the import
+    supersedes a sample's calls rather than adding to them, so the older run's output is
+    about to be overwritten whatever happens. Letting it finish costs hours of CPU to produce
+    something the new run discards.
+
+    **Cooperative, like every other cancellation here.** The flag is set through
+    `mutint_jobs`; a running task sees it between slices of breseq's output, and one still
+    queued sees it at entry -- `request_cancel` deliberately never touches the queue row. So
+    this asks, and the task is what records the cancellation and throws the work away.
+    """
+    in_flight = BreseqRun.objects.filter(
+        experiment=experiment, sample_name=sample_name,
+        status__in=(STATUS_QUEUED, STATUS_RUNNING)).exclude(task_result_id="")
+    stopped = jobs_api.request_cancel_for(
+        list(in_flight.values_list("task_result_id", flat=True)), by=user)
+    if stopped:
+        logger.info("superseding %d in-flight breseq run(s) for %s in experiment %s",
+                    stopped, sample_name, experiment.id)
+    return stopped
+
+
+def _existing_samples(experiment):
+    """The coordinates and names a new run could land on top of.
+
+    **A collision is not refused and does not make a second sample: it supersedes the first.**
+    `gd_import.import_document_as_sample` reuses the sample at a coordinate and
+    `_database_gd_mutations` clears its calls before writing the new ones -- which is how a
+    corrected breseq run replaces the one it supersedes, and is a thing people do on purpose.
+    So the page warns and does not block; this is what it warns from.
+
+    Both keys, because the importer uses both: a placed name matches on the coordinate, and a
+    name carrying none matches on `source_name`.
+
+    The ancestor is included -- `include_ancestor=True` -- because a collision with it is
+    still a collision, and it is the one sample every listing otherwise hides.
+    """
+    from mutint_experiment.coordinates import format_time_point
+    from mutint_sample.util import get_ordered_sample_queryset
+
+    rows = []
+    for sample in (get_ordered_sample_queryset(experiment.id, include_ancestor=True)
+                   .select_related("population")):
+        rows.append({
+            "population": sample.population.name if sample.population_id else "",
+            "time_point": ("" if sample.time_point is None
+                           else str(format_time_point(sample.time_point))),
+            "sample": sample.name,
+            "source_name": sample.source_name or "",
+            "label": sample.label,
+        })
+    return rows
 
 
 def _queue_status(run):
@@ -258,12 +322,24 @@ def launch(request):
 
     payload = _payload(request)
 
-    sample_name = (payload.get("sample_name") or "").strip()
+    # **The three parts, not a joined name.** How a population, a time point and a sample
+    # become one string is `sample_names.compose_sample_name`'s to decide -- the form sends
+    # what it knows and the convention can change without the form changing with it. That
+    # composer also refuses the combinations that cannot be a name, and says which field is
+    # at fault so the page can point at it.
+    try:
+        sample_name = sample_names.compose_sample_name(
+            payload.get("population"), payload.get("time_point"), payload.get("sample"))
+    except sample_names.SampleNameError as refusal:
+        return JsonResponse({"error": str(refusal), "field": refusal.field}, status=400)
+
     if not SAMPLE_NAME_RE.match(sample_name):
+        # The composer keeps each part inside this pattern, so reaching here means the parts
+        # were individually fine and the whole is not -- a name past 100 characters.
         return JsonResponse(
-            {"error": "A sample name may use letters, digits, dot, underscore, plus and "
-                      "hyphen, and must start with a letter or digit. It becomes this "
-                      "sample's name everywhere in MutInt."}, status=400)
+            {"error": "That name is too long: %d characters, and the limit is 100. It "
+                      "becomes a directory name as well as this sample's name."
+                      % len(sample_name), "field": "sample"}, status=400)
 
     arguments = (payload.get("arguments") or "").strip()
     if len(arguments) > MAX_ARGUMENTS_CHARS:
@@ -295,6 +371,10 @@ def launch(request):
         staged_root = staging.claim(session)
     except UploadError as exc:
         return JsonResponse({"error": str(exc)}, status=409)
+
+    # Before the new row exists, so it cannot cancel itself. Anything already in flight for
+    # this sample is about to have its output overwritten -- see `_supersede_in_flight`.
+    superseded = _supersede_in_flight(experiment, sample_name, request.user)
 
     run = BreseqRun.objects.create(
         experiment=experiment,
@@ -337,7 +417,8 @@ def launch(request):
     run.task_result_id = job.task_result_id
     run.save(update_fields=["task_result_id"])
 
-    return JsonResponse({"run_id": run.pk, "runs": _run_rows(experiment)})
+    return JsonResponse({"run_id": run.pk, "superseded": superseded,
+                         "runs": _run_rows(experiment)})
 
 
 def _take_reads(staged_root, run):

@@ -100,6 +100,45 @@ and `reference.sequence_set_digest` of the two is equal — which is what stops
 `_establish_or_check_reference` rejecting every run as a reference mismatch. Verified before
 this was written.
 
+### The name is four boxes, and the three parts are what is posted
+
+**Full Name** plus **Population**, **Time point** and **Sample**, kept in step both ways:
+typing a name splits it, editing a part rebuilds it. The split is
+`mutint_common/staticfiles/js/mutint_sample_names.js`, core's transcription of
+`mutint_import/sample_names.py`.
+
+**The endpoint takes the three parts, not the joined name**, and
+`sample_names.compose_sample_name` makes the name. That is deliberate: how a coordinate
+becomes a string is one rule in one place, and it can change without this form changing with
+it. The composer refuses what cannot be a name -- a population without a time point, a space
+in a part, a fractional time point -- and says *which field* is at fault, so the page can
+point at the box rather than at the form.
+
+**The preview can be wrong and the import cannot.** The JS decides nothing; the server composes
+and the importer parses, both in Python. That is the whole argument for having a second copy of
+the rule at all, and the JS header records the two ways it is known to under-read.
+
+**A blank Population and Time point is the unplaced case**, and the page says so: the sample
+lands on `Unspecified` with no time point rather than on a population called `1`.
+
+**A collision warns and does not block.** Importing a sample the experiment already holds
+*supersedes* it -- `_database_gd_mutations` clears its calls before writing the new ones -- and
+that is a thing people do on purpose after fixing a command line. So the page names the sample
+that would be replaced and lets the launch through. `views._existing_samples` is what it warns
+from, keyed both ways because the importer matches a placed name on the coordinate and an
+unplaced one on `source_name`.
+
+**Relaunching a sample whose run is still in flight stops the earlier run**
+(`views._supersede_in_flight`). Two runs writing one sample race, and the older one's output is
+about to be overwritten whatever happens. Cooperative like every cancellation here: the flag is
+set through `mutint_jobs.request_cancel_for` and the task is what acts on it. The ground for
+cancelling is not that the job is yours -- it is that this component has superseded its own
+earlier work.
+
+**A launch clears the files and nothing else.** A batch is one population and one time point
+with a different sample each time, so emptying those would make the common case the one that
+costs the most typing.
+
 ### breseq is asked whether it would accept the command line, twice
 
 `breseq --dry-run` validates every option, checks that bowtie2, samtools and gnuplot are

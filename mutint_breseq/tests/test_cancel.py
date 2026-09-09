@@ -72,7 +72,7 @@ class CancelledRunTestCase(TestCase):
         self.experiment = _create_experiment(self.project, "e", self.owner)
         establish_reference(self.experiment)
 
-    def _launch(self, sample_name="s1"):
+    def _launch(self, sample="s1"):
         session = staging.open_session(
             self.owner, self.experiment, "mutint_breseq", [{"path": "r1.fastq", "size": 4}])
         root = store.ensure_dir(store.staging_dir(session.id))
@@ -81,7 +81,8 @@ class CancelledRunTestCase(TestCase):
         return self.client.post(
             "/breseq/launch?experiment_id=%s" % self.experiment.id,
             data=json.dumps({"upload_id": str(session.id),
-                             "sample_name": sample_name, "arguments": ""}),
+                             "sample": sample, "population": "", "time_point": "",
+                             "arguments": ""}),
             content_type="application/json")
 
     def test_launching_records_a_cancellable_job(self):
@@ -173,6 +174,50 @@ class CancelledRunTestCase(TestCase):
         self.assertTrue(calls, "the preflight never ran")
         self.assertTrue(all(call["dry_run"] for call in calls),
                         "breseq was started for real after the cancel")
+
+    def test_relaunching_the_same_sample_stops_the_run_already_under_way(self):
+        """Two runs writing one sample race, and the import supersedes a sample's calls
+        rather than adding to them -- so the older run's output is about to be overwritten
+        whatever happens, and finishing it is hours of CPU spent on something discarded."""
+        self._launch()
+        first = BreseqRun.objects.get()
+        self.assertFalse(
+            jobs_api.for_user(self.owner).get(
+                task_result_id=first.task_result_id).cancel_requested)
+
+        response = self._launch()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(1, response.json()["superseded"])
+        self.assertTrue(
+            jobs_api.for_user(self.owner).get(
+                task_result_id=first.task_result_id).cancel_requested,
+            "the run already under way was left running")
+        # And the new one is not asked to stop by its own arrival.
+        second = BreseqRun.objects.exclude(pk=first.pk).get()
+        self.assertFalse(
+            jobs_api.for_user(self.owner).get(
+                task_result_id=second.task_result_id).cancel_requested)
+
+    def test_a_different_sample_is_left_alone(self):
+        self._launch(sample="s1")
+        first = BreseqRun.objects.get()
+
+        response = self._launch(sample="s2")
+
+        self.assertEqual(0, response.json()["superseded"])
+        self.assertFalse(
+            jobs_api.for_user(self.owner).get(
+                task_result_id=first.task_result_id).cancel_requested)
+
+    def test_a_finished_run_is_not_disturbed(self):
+        """Only queued and running rows are in flight. A finished one has nothing to stop."""
+        self._launch()
+        first = BreseqRun.objects.get()
+        first.status = STATUS_CANCELLED
+        first.save(update_fields=["status"])
+
+        self.assertEqual(0, self._launch().json()["superseded"])
 
     def test_a_cancelled_run_can_then_be_deleted(self):
         self._launch()

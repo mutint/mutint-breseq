@@ -70,12 +70,15 @@ class LaunchTestCase(TestCase):
             handle.write("ACGT")
         return session
 
-    def _launch(self, upload_id, sample_name="s1", arguments="", experiment_id=None):
+    def _launch(self, upload_id, sample="s1", population="", time_point="", arguments="",
+                experiment_id=None):
         return self.client.post(
             "/breseq/launch?experiment_id=%s" % (
                 self.experiment.id if experiment_id is None else experiment_id),
             data=json.dumps({"upload_id": str(upload_id),
-                             "sample_name": sample_name,
+                             "sample": sample,
+                             "population": population,
+                             "time_point": time_point,
                              "arguments": arguments}),
             content_type="application/json")
 
@@ -142,16 +145,39 @@ class LaunchTestCase(TestCase):
         # the run directory, but the sample folder inside it is named from here.
         for bad in ("../../etc", "a/b", "", " ", ".hidden", "a b", "s1;rm -rf /"):
             session = self._stage()
-            response = self._launch(session.id, sample_name=bad)
+            response = self._launch(session.id, sample=bad)
             self.assertEqual(response.status_code, 400, "accepted %r" % (bad,))
         self.assertEqual(BreseqRun.objects.count(), 0)
 
-    def test_the_two_parseable_name_shapes_are_accepted(self):
-        # Both are what sample_names.parse_sample_identity reads a coordinate out of, so a
-        # narrower pattern here would quietly stop samples landing on their ALE.
+    def test_the_composed_name_fits_the_pattern_the_directory_needs(self):
+        # The form sends three parts and `compose_sample_name` joins them, so what this
+        # pattern now guards is the *result*: a narrower one would quietly stop samples
+        # landing on their population.
         from mutint_breseq.views import SAMPLE_NAME_RE
-        for good in ("3-30000-1-1", "Ara-2_500gen_763A", "s1", "A.1+2"):
+        for good in ("3-30000-1-1", "Ara-2_500gen_763A", "s1", "A.1+2", "Ara-2_500_763A"):
             self.assertTrue(SAMPLE_NAME_RE.match(good), "refused %r" % (good,))
+
+    def test_a_population_without_a_time_point_is_refused_and_names_the_field(self):
+        """A name carries all three parts or none of them. The refusal says which box is at
+        fault so the page can point at it."""
+        session = self._stage()
+
+        response = self._launch(session.id, population="Ara-2", sample="763A")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["field"], "time_point")
+        self.assertEqual(BreseqRun.objects.count(), 0)
+
+    def test_a_part_with_a_space_is_refused(self):
+        """The composed name is a directory name. The column would hold a space -- a dropped
+        folder can create a population with one -- and a name must not."""
+        session = self._stage()
+
+        response = self._launch(session.id, population="Ara 2", time_point="500",
+                                sample="763A")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["field"], "population")
 
     def test_unbalanced_quotes_in_the_arguments_are_refused(self):
         session = self._stage()
@@ -246,7 +272,7 @@ class PreflightTestCase(TestCase):
     def _launch(self, session, arguments=""):
         return self.client.post(
             "/breseq/launch?experiment_id=%s" % self.experiment.id,
-            data=json.dumps({"upload_id": str(session.id), "sample_name": "s1",
+            data=json.dumps({"upload_id": str(session.id), "sample": "s1",
                              "arguments": arguments}),
             content_type="application/json")
 
