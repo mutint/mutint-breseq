@@ -20,7 +20,12 @@ class BreseqConfig(AppConfig):
         # not carry the sample name and command line the launcher needs (see below). By
         # url_name: the registry skips a tab whose name will not reverse, so a half-installed
         # plugin cannot leave a dead tab.
-        register_import_tab('run_breseq', 'Run breseq', url_name='breseq')
+        # `requires_reference`: breseq calls mutations *against* a reference, and the
+        # launcher refuses without one. A tab naming an import type is hidden by the
+        # registry asking whether that type can run; this one is a page of its own, so
+        # it says for itself rather than showing and then refusing.
+        register_import_tab('run_breseq', 'Run breseq', url_name='breseq',
+                            requires_reference=True)
         register_about_section(self, name='mutint-breseq', version=__version__,
                                template='about/sections/mutint_breseq.html')
 
