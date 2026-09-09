@@ -13,15 +13,33 @@
 # Its dependencies (bowtie2, samtools, htslib, gnuplot, phylip) resolve from bioconda, which
 # is already on that list.
 #
-# Prerelease rather than the stable bioconda `breseq` because this tracks breseq's master:
-# every build reports a version derived from git (0.40.1.dev417+g1a30aed3), so the spec is
-# unpinned and `rm -rf env/tools` is how you move it.
+# Prerelease rather than the stable bioconda `breseq`, because this tracks breseq's master.
+#
+# **Pinned by build string, which is the git hash.** Every build reports a version derived
+# from git -- `0.40.1.dev417+g1a30aed3` -- and publishes it with the short hash as its *build*
+# (`g1a30aed3`), so `=*=<hash>` names exactly one artifact and the hash is the only thing that
+# moves. `=0.40.1.dev417+g1a30aed3` pins the same artifact and is not used, because it is two
+# coupled tokens that must be edited together and mean nothing if they disagree.
+#
+# It was unpinned, on the reasoning that a version cannot distinguish these builds. That is
+# true of the version and not of the build, and unpinned meant a checkout tracked master on a
+# fresh `env/tools` and then never moved again: the spec was already satisfied, so micromamba
+# was never asked. The entry script fingerprints the *spec list* (`env/tools/.installed`), so
+# editing the hash below is what makes the next `./mutint start` install the new breseq --
+# here, and on an installation, through `/upgrade/`, which is applied before that fingerprint
+# is read.
+#
+# **Moving it backwards can fail to solve** in an existing prefix, where breseq's own
+# dependencies are already installed at versions a much older build will not take. Measured:
+# `=*=gc6cf9186` (44 commits back) refuses with `conflicts with any installable versions`.
+# `rm -rf env/tools` is the way through, and is safe -- the tools live in `env/`, the database
+# and the file store in `data/`.
 #
 # **breseq shells out to its own toolchain by bare name** -- bowtie2, samtools, gnuplot --
 # so `tool_path("breseq")` is not sufficient on its own: the subprocess needs env/tools/bin
 # on PATH or breseq stops with `Required executable "bowtie2" not found`, having exited 0.
 # mutint_breseq/runner.py `tool_environment()` is what builds that PATH.
-https://barricklab.github.io/conda/::breseq-prerelease
+https://barricklab.github.io/conda/::breseq-prerelease=*=g1a30aed3
 
 # fastp trims adapters off the reads before breseq sees them, when a run asks for it -- which
 # is the default. bioconda has it, so no channel prefix; `--detect_adapter_for_pe` has been in
