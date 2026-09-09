@@ -100,6 +100,46 @@ and `reference.sequence_set_digest` of the two is equal — which is what stops
 `_establish_or_check_reference` rejecting every run as a reference mismatch. Verified before
 this was written.
 
+### breseq is asked whether it would accept the command line, twice
+
+`breseq --dry-run` validates every option, checks that bowtie2, samtools and gnuplot are
+installed, checks every input file exists and every output path can be written, then exits
+without running and **without creating anything** -- 0 if it is happy, 255 if not. It is asked
+in two places, for two different reasons:
+
+| | reads it names | what it establishes |
+|---|---|---|
+| `views._preflight`, at launch | a throwaway FASTQ in a temp dir | the box is a command line breseq accepts |
+| `tasks.run_breseq`, before trimming | the real untrimmed reads | that, **and** that this machine has the toolchain |
+
+**The launch one runs before the upload is claimed**, which is the whole reason it is where it
+is. Once `_take_reads` has moved the reads out of staging, the only way to try again is to
+upload them again -- so a typo in the arguments box has to be caught while the session is still
+open. It creates no `BreseqRun` and closes no session: fix the box, press the button again.
+
+**It writes its own FASTQ because breseq checks that inputs exist.** A genuinely absent path
+fails the check rather than passing it, so one four-line record in a `TemporaryDirectory` is
+what makes the check about the *options*. Measured: a minimal record satisfies it and the
+output directory is never created.
+
+**The worker's check is not the same check.** Options cannot change in between, but the machine
+can: `db_worker` may run on another host, and one started outside `./mutint` has no
+`MUTINT_TOOLS_DIR` and finds none of breseq's toolchain. It is also the cheapest place the
+missing-bowtie2 trap is caught -- breseq stops for that **exiting 0**, which `check_output`
+otherwise only discovers after a run that did nothing.
+
+**One argv builder.** `runner.build_argv(dry_run=True)` is the real command line plus the flag,
+because a preflight assembled separately would validate something other than what runs. The one
+difference it cannot avoid is the read files, which is why the launch check is about options
+alone and the worker's is about options as they will actually be given.
+
+**What it does not catch**: option *values*. Measured, `-j notanumber` passes the dry run. It
+knows what options exist and whether paths are usable, and does not pretend to more.
+
+`runner.refusal_from` is what reaches a person: breseq answers an unknown option by printing its
+whole help and the reason on the last line, and a bad path with `---> ERROR` lines and a summary
+-- so it keeps every ERROR line plus the last one. The full output is in the job log either way.
+
 ### Cancellation is cooperative, and reaches the whole process group
 
 The first `cancellable=True` task in the suite. The queue cannot interrupt a running task -- it

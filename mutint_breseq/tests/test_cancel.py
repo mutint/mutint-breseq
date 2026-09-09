@@ -165,8 +165,14 @@ class CancelledRunTestCase(TestCase):
         self.assertTrue(wait_until_gone(pids["child"]), "fastp's child outlived the cancel")
         self.assertFalse(os.path.exists(run.trimmed_dir()))
         self.assertFalse(os.path.exists(run.reads_dir()))
-        self.assertFalse(os.path.exists(os.path.join(self.template_root, "argv.json")),
-                         "breseq was started after the cancel")
+        # Not "the file does not exist" any more: the preflight runs breseq with `--dry-run`
+        # before trimming, so the record is already there. What must not have happened is a
+        # *real* run.
+        with open(os.path.join(self.template_root, "argv.json")) as handle:
+            calls = [json.loads(line) for line in handle if line.strip()]
+        self.assertTrue(calls, "the preflight never ran")
+        self.assertTrue(all(call["dry_run"] for call in calls),
+                        "breseq was started for real after the cancel")
 
     def test_a_cancelled_run_can_then_be_deleted(self):
         self._launch()

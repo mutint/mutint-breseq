@@ -94,6 +94,16 @@ through as well. Compression is untouched: a gzipped file comes out gzipped.
 If fastp fails the run fails, with fastp's output in the log, rather than quietly running breseq
 on the untrimmed reads. Untick the box to skip trimming altogether.
 
+## If breseq will not accept your options
+
+The box is handed to breseq before anything else happens, and breseq is asked whether it would
+accept it. A flag it does not recognise, or a path it cannot use, comes back as an error beside
+the form straight away -- with breseq's own words -- and **nothing is consumed**: no run is
+created and your upload is still there, so fix the box and press Launch again.
+
+It checks that the options exist and that the files do. It does not check that a value makes
+sense: `-j notanumber` gets past it and fails later.
+
 ## Watching it
 
 The run list under the form updates itself while anything is in flight:

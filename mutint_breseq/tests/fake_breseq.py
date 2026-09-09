@@ -8,14 +8,18 @@ executable in the middle is the one part worth faking.
 It is a real executable on disk rather than a `subprocess.run` patch on purpose: the two things
 most likely to be wrong here are the argv and the PATH, and a patch would assert against the
 call rather than against a process that actually has to start.
+
+It records **one JSON line per call**, because a run invokes breseq twice: `--dry-run` first,
+then the real thing.
 """
 
 import os
 import stat
+import sys
 import textwrap
 
 SCRIPT = textwrap.dedent('''\
-    #!/usr/bin/env python3
+    #!{python}
     """Stand-in breseq. Copies a prepared sample folder to -o and records its argv."""
     import json
     import os
@@ -28,8 +32,24 @@ SCRIPT = textwrap.dedent('''\
     template = os.environ["FAKE_BRESEQ_TEMPLATE"]
     record = os.environ["FAKE_BRESEQ_ARGV"]
 
-    with open(record, "w") as handle:
-        json.dump({"argv": argv, "path": os.environ.get("PATH", "")}, handle)
+    # **Appended, one JSON line per call**, the way fake_fastp already does: a run invokes
+    # breseq twice now -- once for --dry-run and once for real -- and overwriting would leave
+    # the tests unable to see the first or to prove the order of the two.
+    with open(record, "a") as handle:
+        handle.write(json.dumps(
+            {"argv": argv, "path": os.environ.get("PATH", ""),
+             "dry_run": "--dry-run" in argv}) + "\\n")
+
+    # The preflight: exit without doing anything, and without creating -o. Real breseq
+    # validates the options and every path here; what matters to the tests is that it runs
+    # first, creates nothing, and can be made to refuse.
+    if "--dry-run" in argv:
+        if os.environ.get("FAKE_BRESEQ_DRY_RUN_FAIL"):
+            sys.stdout.write("Unknown command argument option: no-such-flag\\n")
+            sys.exit(255)
+        sys.stdout.write("+++   DRY RUN PASSED -- options and paths are valid, "
+                         "no work performed\\n")
+        sys.exit(0)
 
     # A run that does not return, for the cancellation tests. It spawns a child first and
     # writes both pids out, because killing only the parent is the mistake this is here to
@@ -77,6 +97,10 @@ def install(tools_dir):
     os.makedirs(bin_dir, exist_ok=True)
     path = os.path.join(bin_dir, "breseq")
     with open(path, "w") as handle:
-        handle.write(SCRIPT)
+        # This interpreter, by absolute path, rather than `#!/usr/bin/env python3`: the kernel
+        # resolves a shebang through PATH, and two tests empty PATH deliberately to prove that
+        # `tool_path` falls back to it. Without this they fail on the fake refusing to start
+        # rather than on the thing they are about.
+        handle.write(SCRIPT.replace("{python}", sys.executable))
     os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return path

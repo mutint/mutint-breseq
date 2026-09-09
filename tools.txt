@@ -16,9 +16,19 @@
 # Prerelease rather than the stable bioconda `breseq`, because this tracks breseq's master.
 #
 # **Pinned by build string, which is the git hash.** Every build reports a version derived
-# from git -- `0.40.1.dev417+g1a30aed3` -- and publishes it with the short hash as its *build*
-# (`g1a30aed3`), so `=*=<hash>` names exactly one artifact and the hash is the only thing that
-# moves. `=0.40.1.dev417+g1a30aed3` pins the same artifact and is not used, because it is two
+# from git -- `0.40.1.dev422+g23736ada` -- and publishes it with the short hash as its *build*
+# (`g23736ada`), so `=*=<hash>` names exactly one artifact and the hash is the only thing that
+# moves.
+#
+# **This build is a requirement rather than a preference**: it is the first with `--dry-run`,
+# which `views.launch` and `tasks.run_breseq` both gate a run on. An older breseq rejects that
+# flag, so every run would fail at the preflight -- which is the loud failure to want, but it
+# means moving the pin backwards past g23736ada is not a thing that works.
+#
+# It also predicts CN, DP, MP and PD evidence by default, where those were opt-in. The old
+# `--predict-*` flags are still accepted and now do nothing, and the old `--skip-*-prediction`
+# spellings still work, so arguments saved on existing runs keep working. CN wants `CNery` on
+# PATH and is skipped with a warning without it, which is why nothing is added below. `=0.40.1.dev417+g1a30aed3` pins the same artifact and is not used, because it is two
 # coupled tokens that must be edited together and mean nothing if they disagree.
 #
 # It was unpinned, on the reasoning that a version cannot distinguish these builds. That is
@@ -39,7 +49,7 @@
 # so `tool_path("breseq")` is not sufficient on its own: the subprocess needs env/tools/bin
 # on PATH or breseq stops with `Required executable "bowtie2" not found`, having exited 0.
 # mutint_breseq/runner.py `tool_environment()` is what builds that PATH.
-https://barricklab.github.io/conda/::breseq-prerelease=*=g1a30aed3
+https://barricklab.github.io/conda/::breseq-prerelease=*=g23736ada
 
 # fastp trims adapters off the reads before breseq sees them, when a run asks for it -- which
 # is the default. bioconda has it, so no channel prefix; `--detect_adapter_for_pe` has been in

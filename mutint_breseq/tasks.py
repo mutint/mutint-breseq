@@ -57,6 +57,11 @@ DEFAULT_TIMEOUT_SECONDS = 12 * 60 * 60
 LOCK_WAIT_SECONDS = 30 * 60
 LOCK_POLL_SECONDS = 5
 
+# `breseq --dry-run` parses the options and stats a handful of paths. It gets a budget of its
+# own rather than eating the run's twelve hours, because if it ever fails to return, failing in
+# minutes is the useful answer and failing at the end of the day is not.
+DRY_RUN_TIMEOUT_SECONDS = 5 * 60
+
 
 def _timeout():
     return getattr(settings, "MUTINT_BRESEQ_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
@@ -247,6 +252,41 @@ def run_breseq(context, run_id):
     # below -- so `/jobs/<pk>/log` shows the run's account in the order it happened, while it
     # is still happening. Everything after this point is inside it.
     with logs.open_log(queue_id) as log:
+        # Asked before anything is trimmed, and asked again here having already been asked at
+        # launch. Not redundant: `views._preflight` checks the box on the web host, and this
+        # checks the machine that will actually do the work -- a `db_worker` started outside
+        # `./mutint` has no MUTINT_TOOLS_DIR and finds none of breseq's toolchain. It is also
+        # the check that catches breseq stopping for a missing bowtie2 **exiting 0**, which
+        # `check_output` otherwise only notices after hours of not running.
+        #
+        # `reads` is still the untrimmed list here, which is what the dry run wants: the
+        # trimmed copies do not exist yet, and breseq checks that its inputs do.
+        argv = runner.build_argv(breseq, run.output_dir(), reference, run.arguments, reads,
+                                 processors=runner.default_processors(), dry_run=True)
+        try:
+            returncode = processes.run_tool(
+                argv, log, env=runner.tool_environment(),
+                timeout=DRY_RUN_TIMEOUT_SECONDS,
+                is_cancelled=lambda: jobs.is_cancelled(queue_id), what="breseq --dry-run")
+        except processes.Cancelled:
+            _cancelled(run, log=_tail(queue_id, run))
+            return None
+        except subprocess.TimeoutExpired:
+            _fail(run, "breseq did not answer within %d seconds when asked to check this "
+                       "command line." % DRY_RUN_TIMEOUT_SECONDS, log=_tail(queue_id, run))
+            raise
+        except OSError as exc:
+            _fail(run, "breseq could not be started: %s" % exc, log=_tail(queue_id, run))
+            raise
+
+        if returncode != 0:
+            output = _tail(queue_id, run)
+            _fail(run, "breseq will not accept this command line:\n\n%s"
+                       % (runner.refusal_from(output)
+                          or "it exited %d without saying why." % returncode),
+                  log=output)
+            raise RuntimeError("breseq refused the command line for run %s" % run.pk)
+
         if run.trim_reads:
             try:
                 fastp = runner.fastp_path()

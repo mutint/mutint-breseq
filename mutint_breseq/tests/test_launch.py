@@ -16,7 +16,10 @@ from django.test import TestCase, override_settings
 from mutint_common import store
 from mutint_experiment.models import Experiment, Project
 from mutint_import import reference, reference_store, staging
+from mutint_import.models import STATE_OPEN, UploadSession
 from mutint_import.tests import breseq_fixture
+
+from mutint_breseq.tests import fake_breseq, fake_fastp
 
 from mutint_breseq.models import (
     STATUS_IMPORTED, STATUS_RUNNING, BreseqRun,
@@ -191,6 +194,114 @@ class LaunchTestCase(TestCase):
         self.assertEqual(
             self.client.get("/breseq/launch?experiment_id=%s" % self.experiment.id).status_code,
             405)
+
+
+class PreflightTestCase(TestCase):
+    """`breseq --dry-run`, asked before the upload is claimed.
+
+    The placement is the point: a command line breseq will not accept has to cost the person
+    nothing, and once the reads have been moved out of staging the only way to try again is to
+    upload them again.
+    """
+
+    def setUp(self):
+        self.owner = User.objects.create(username="owner", email="o@e.com", is_active=True)
+        self.client.force_login(self.owner)
+
+        self.store = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.store, True)
+        self.tools = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tools, True)
+        self.template_root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.template_root, True)
+
+        fake_breseq.install(self.tools)
+        fake_fastp.install(self.tools)
+        patcher = override_settings(MUTINT_STORE_DIR=self.store, MUTINT_TOOLS_DIR=self.tools)
+        patcher.enable()
+        self.addCleanup(patcher.disable)
+
+        for name, value in (("FAKE_BRESEQ_TEMPLATE", self.template_root),
+                            ("FAKE_BRESEQ_ARGV",
+                             os.path.join(self.template_root, "argv.json")),
+                            ("FAKE_FASTP_ARGV",
+                             os.path.join(self.template_root, "fastp.jsonl"))):
+            os.environ[name] = value
+            self.addCleanup(os.environ.pop, name, None)
+
+        self.project = Project.objects.create(name="p", user=self.owner)
+        from mutint_experiment.views import _create_experiment
+        self.experiment = _create_experiment(self.project, "e", self.owner)
+        establish_reference(self.experiment)
+
+    def _stage(self):
+        session = staging.open_session(
+            self.owner, self.experiment, "mutint_breseq",
+            [{"path": "s1.fastq", "size": 4}])
+        root = store.ensure_dir(store.staging_dir(session.id))
+        with open(os.path.join(root, "s1.fastq"), "w") as handle:
+            handle.write("ACGT")
+        return session
+
+    def _launch(self, session, arguments=""):
+        return self.client.post(
+            "/breseq/launch?experiment_id=%s" % self.experiment.id,
+            data=json.dumps({"upload_id": str(session.id), "sample_name": "s1",
+                             "arguments": arguments}),
+            content_type="application/json")
+
+    def test_a_command_line_breseq_refuses_is_rejected_with_its_own_message(self):
+        os.environ["FAKE_BRESEQ_DRY_RUN_FAIL"] = "1"
+        self.addCleanup(os.environ.pop, "FAKE_BRESEQ_DRY_RUN_FAIL", None)
+        session = self._stage()
+
+        response = self._launch(session, arguments="--no-such-flag")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("no-such-flag", response.json()["error"])
+
+    def test_a_refused_launch_costs_the_upload_nothing(self):
+        """No run row, no reads moved, and the session still launchable -- so the fix is to
+        edit the box and press the button again, not to upload gigabytes a second time."""
+        os.environ["FAKE_BRESEQ_DRY_RUN_FAIL"] = "1"
+        self.addCleanup(os.environ.pop, "FAKE_BRESEQ_DRY_RUN_FAIL", None)
+        session = self._stage()
+
+        self.assertEqual(self._launch(session, arguments="--no-such-flag").status_code, 400)
+
+        self.assertFalse(BreseqRun.objects.exists())
+        self.assertEqual(UploadSession.objects.get(pk=session.id).state, STATE_OPEN)
+        self.assertTrue(os.path.isfile(
+            os.path.join(store.staging_dir(session.id), "s1.fastq")))
+
+        # And the proof that it is not merely left behind but usable: the same upload launches
+        # once the box is fixed.
+        os.environ.pop("FAKE_BRESEQ_DRY_RUN_FAIL", None)
+        self.assertEqual(self._launch(session).status_code, 200)
+        self.assertEqual(1, BreseqRun.objects.count())
+
+    def test_the_preflight_names_a_file_of_its_own_and_leaves_nothing_behind(self):
+        """It writes a throwaway FASTQ because breseq checks that inputs exist -- and it is a
+        temp directory, so nothing of it survives the request."""
+        session = self._stage()
+        self.assertEqual(self._launch(session).status_code, 200)
+
+        with open(os.environ["FAKE_BRESEQ_ARGV"]) as handle:
+            calls = [json.loads(line) for line in handle if line.strip()]
+        dry = [call for call in calls if call["dry_run"]]
+        self.assertTrue(dry, "the preflight never ran")
+
+        reads = dry[0]["argv"][-1]
+        self.assertTrue(reads.endswith("preflight.fastq"), reads)
+        self.assertFalse(os.path.exists(reads), "the throwaway FASTQ outlived the request")
+
+    def test_a_good_command_line_still_launches(self):
+        session = self._stage()
+
+        response = self._launch(session, arguments="-p")
+
+        self.assertEqual(response.status_code, 200, response.content[:300])
+        self.assertEqual(1, BreseqRun.objects.count())
 
 
 class RunListTestCase(TestCase):

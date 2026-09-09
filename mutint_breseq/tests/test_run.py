@@ -18,12 +18,18 @@ from django.test import TestCase, override_settings
 from mutint_common import store
 from mutint_experiment.models import Project
 from mutint_import import staging
+from mutint_common.tools import ToolMissing
 from mutint_import.tests import breseq_fixture
 from mutint_jobs import logs
 from mutint_sample.models import Mutation, MutationCall, Sample
 
 from mutint_breseq import runner, tasks
-from mutint_breseq.models import STATUS_FAILED, STATUS_IMPORTED, BreseqRun
+from mutint_breseq.models import (
+    STATUS_FAILED,
+    STATUS_IMPORTED,
+    STATUS_QUEUED,
+    BreseqRun,
+)
 from mutint_breseq.tests import fake_breseq, fake_fastp
 from mutint_breseq.tests.test_launch import establish_reference
 
@@ -88,9 +94,25 @@ class RunTestCase(TestCase):
             "/breseq/launch?experiment_id=%s" % self.experiment.id,
             data=json.dumps(body), content_type="application/json")
 
-    def _recorded_argv(self):
+    def _recorded_breseq(self):
+        """Every breseq call the run made, in order; [] when it made none.
+
+        One JSON line per call, because a run invokes breseq twice: `--dry-run`, then the
+        real thing.
+        """
+        if not os.path.exists(self.argv_record):
+            return []
         with open(self.argv_record) as handle:
-            return json.load(handle)
+            return [json.loads(line) for line in handle if line.strip()]
+
+    def _recorded_argv(self):
+        """The real run's call -- the last one that is not a dry run."""
+        real = [call for call in self._recorded_breseq() if not call["dry_run"]]
+        self.assertTrue(real, "breseq was never run for real")
+        return real[-1]
+
+    def _recorded_dry_runs(self):
+        return [call for call in self._recorded_breseq() if call["dry_run"]]
 
     def _recorded_fastp(self):
         """Every fastp call the run made, in order; [] when it made none."""
@@ -114,6 +136,60 @@ class RunTestCase(TestCase):
             if text:
                 found[name] = text
         return found
+
+    # --- the preflight ------------------------------------------------------------------
+
+    def test_the_dry_run_comes_before_any_trimming(self):
+        """Order is the point: nothing should be trimmed for a command line breseq will not
+        take. fastp's first call must fall after the dry run and before the real breseq."""
+        self._launch()
+
+        calls = self._recorded_breseq()
+        self.assertTrue(calls[0]["dry_run"], "the first breseq call was not the preflight")
+        self.assertFalse(calls[-1]["dry_run"], "the real run never happened")
+        self.assertTrue(self._recorded_fastp(), "nothing was trimmed")
+        # The fake appends as it goes, so the dry run's line existing before fastp ran is the
+        # order. Asserted through the run's own log, which holds all three in sequence.
+        run = BreseqRun.objects.get()
+        log = "\n".join(self._job_logs().values())
+        self.assertLess(log.index("--dry-run"), log.index("fastp"))
+        self.assertEqual(run.status, STATUS_IMPORTED, run.error)
+
+    def test_a_refused_command_line_fails_the_run_without_trimming_or_running(self):
+        """The worker's half of the preflight, which launch can no longer produce.
+
+        `views._preflight` refuses the same command line at launch, so reaching this state
+        through the endpoint is impossible by construction -- and the task's check is not
+        redundant for that: it runs on the machine that will do the work, which may not be the
+        one that accepted the launch, and it is what catches a worker whose breseq is not the
+        one the web host asked.
+        """
+        # Launched so that it *fails*, because a successful run imports and
+        # `cleanup_after_import` takes the reads with it -- and this needs a run directory
+        # still standing to re-run the task against.
+        os.environ["FAKE_BRESEQ_FAIL"] = "3"
+        self.assertEqual(self._launch().status_code, 200)
+        os.environ.pop("FAKE_BRESEQ_FAIL", None)
+
+        run = BreseqRun.objects.get()
+        run.status, run.error, run.log = STATUS_QUEUED, "", ""
+        run.save(update_fields=["status", "error", "log"])
+        os.remove(self.argv_record)
+        os.remove(self.fastp_record)
+
+        os.environ["FAKE_BRESEQ_DRY_RUN_FAIL"] = "1"
+        self.addCleanup(os.environ.pop, "FAKE_BRESEQ_DRY_RUN_FAIL", None)
+        with self.assertRaises(RuntimeError):
+            tasks.run_breseq.call(None, run.pk)
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, STATUS_FAILED)
+        self.assertIn("will not accept this command line", run.error)
+        self.assertIn("no-such-flag", run.error)
+        self.assertEqual([], self._recorded_fastp(), "reads were trimmed anyway")
+        self.assertEqual([], [call for call in self._recorded_breseq()
+                              if not call["dry_run"]], "breseq ran anyway")
+        self.assertTrue(os.path.isdir(run.reads_dir()), "a failure keeps the reads")
 
     # --- the log ------------------------------------------------------------------------
 
@@ -288,8 +364,11 @@ class RunTestCase(TestCase):
         self.assertIn("fastp exited 2", run.error)
         self.assertIn("adapter detection failed", run.log)
         self.assertTrue(os.path.isdir(run.reads_dir()))
-        # breseq was never started: nothing recorded an argv.
-        self.assertFalse(os.path.exists(self.argv_record))
+        # breseq was never started **for real**. The preflight ran it before trimming, so the
+        # record exists; what must not be there is a call without `--dry-run`.
+        self.assertTrue(self._recorded_dry_runs(), "the preflight never ran")
+        self.assertEqual([], [call for call in self._recorded_breseq()
+                              if not call["dry_run"]])
 
     def test_a_missing_fastp_says_what_installs_it(self):
         os.remove(os.path.join(self.tools, "bin", "fastp"))
@@ -423,9 +502,34 @@ class RunTestCase(TestCase):
         # a solve. On a machine that has one, not clearing it tests the developer's breseq.
         with override_settings(MUTINT_TOOLS_DIR=os.path.join(self.tools, "empty")), \
                 mock.patch.dict(os.environ, {"PATH": ""}):
-            self.assertEqual(self._launch().status_code, 200)
+            response = self._launch()
 
+        # **Launch refuses now**, where this used to be a run that failed later: the preflight
+        # needs breseq before it can ask breseq anything, so a machine without it is told at
+        # the point somebody is standing there rather than after the upload is consumed.
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("breseq is not installed", response.json()["error"])
+        self.assertIn("install", response.json()["error"])
+        self.assertFalse(BreseqRun.objects.exists(), "a refused launch left a run behind")
+
+    def test_a_worker_without_breseq_fails_the_run_and_says_what_installs_it(self):
+        """The other half, which launch can no longer reach.
+
+        A run gets past the preflight on the web host and is then picked up by a `db_worker`
+        started outside `./mutint`, which has no MUTINT_TOOLS_DIR and finds no breseq. Called
+        directly, because by construction this cannot be produced through the endpoint.
+        """
+        self.assertEqual(self._launch().status_code, 200)
         run = BreseqRun.objects.get()
+        run.status, run.error = STATUS_QUEUED, ""
+        run.save(update_fields=["status", "error"])
+
+        with override_settings(MUTINT_TOOLS_DIR=os.path.join(self.tools, "empty")), \
+                mock.patch.dict(os.environ, {"PATH": ""}):
+            with self.assertRaises(ToolMissing):
+                tasks.run_breseq.call(None, run.pk)
+
+        run.refresh_from_db()
         self.assertEqual(run.status, STATUS_FAILED)
         self.assertIn("breseq is not installed", run.error)
         self.assertIn("install", run.error)

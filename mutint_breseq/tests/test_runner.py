@@ -68,6 +68,55 @@ class ArgvTestCase(SimpleTestCase):
         self.assertNotIn("-j", self.build(processors=None))
 
 
+class DryRunArgvTestCase(TestCase):
+    """The preflight has to be the real command line plus one flag, or it checks the wrong
+    thing. One builder is what guarantees that; this is what says so."""
+
+    def test_it_is_the_real_argv_plus_the_flag(self):
+        common = dict(output_dir="/out", reference="/ref.gff3",
+                      arguments="-p --polymorphism-minimum-variant-coverage 4",
+                      reads=["/r1.fastq", "/r2.fastq"], processors=8)
+        real = runner.build_argv("breseq", **common)
+        dry = runner.build_argv("breseq", dry_run=True, **common)
+
+        self.assertEqual([arg for arg in dry if arg != runner.DRY_RUN_FLAG], real)
+        self.assertIn(runner.DRY_RUN_FLAG, dry)
+
+    def test_it_is_absent_by_default(self):
+        argv = runner.build_argv("breseq", "/out", "/ref.gff3", "", ["/r1.fastq"])
+        self.assertNotIn(runner.DRY_RUN_FLAG, argv)
+
+
+class RefusalTestCase(TestCase):
+    """What of a failed dry run reaches a person. Both shapes are breseq's, measured."""
+
+    def test_an_unknown_option_is_the_last_line(self):
+        # Real breseq prints its whole help first -- 45 lines of it -- and the reason last.
+        output = ("  -j,--num-processors  Number of processors\n"
+                  "  -p,--polymorphism-prediction  The sample is not clonal\n"
+                  "\n"
+                  "Unknown command argument option: no-such-flag\n")
+
+        self.assertEqual("Unknown command argument option: no-such-flag",
+                         runner.refusal_from(output))
+
+    def test_a_bad_path_keeps_the_error_lines_and_the_summary(self):
+        output = ("Checking input and output paths\n"
+                  "---> -o/--output :: /out [will be created under /]\n"
+                  "---> ERROR Input file for Read file does not exist: /nope.fastq\n"
+                  "\n"
+                  "Could not validate the file and folder arguments listed above.\n")
+
+        self.assertEqual(
+            "---> ERROR Input file for Read file does not exist: /nope.fastq\n"
+            "Could not validate the file and folder arguments listed above.",
+            runner.refusal_from(output))
+
+    def test_nothing_at_all_is_empty_rather_than_an_exception(self):
+        self.assertEqual("", runner.refusal_from(""))
+        self.assertEqual("", runner.refusal_from(None))
+
+
 class FastpArgvTestCase(SimpleTestCase):
     def test_a_pair_gets_both_mates_and_the_paired_adapter_flag(self):
         read_set = pairing.ReadFileSet("s_RX", ["/reads/s_R1.fastq.gz", "/reads/s_R2.fastq.gz"])

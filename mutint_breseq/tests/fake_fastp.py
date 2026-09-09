@@ -8,10 +8,11 @@ that is all. Appends rather than overwrites, because one run calls fastp once pe
 
 import os
 import stat
+import sys
 import textwrap
 
 SCRIPT = textwrap.dedent('''\
-    #!/usr/bin/env python3
+    #!{python}
     """Stand-in fastp. Copies -i to -o (and -I to -O), records its argv."""
     import json
     import os
@@ -59,6 +60,10 @@ def install(tools_dir):
     os.makedirs(bin_dir, exist_ok=True)
     path = os.path.join(bin_dir, "fastp")
     with open(path, "w") as handle:
-        handle.write(SCRIPT)
+        # This interpreter, by absolute path, rather than `#!/usr/bin/env python3`: the kernel
+        # resolves a shebang through PATH, and two tests empty PATH deliberately to prove that
+        # `tool_path` falls back to it. Without this they fail on the fake refusing to start
+        # rather than on the thing they are about.
+        handle.write(SCRIPT.replace("{python}", sys.executable))
     os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return path

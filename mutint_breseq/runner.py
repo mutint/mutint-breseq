@@ -39,6 +39,15 @@ FASTP_MAX_THREADS = 16
 # box does nothing.
 PROCESSOR_FLAGS = ("-j", "--num-processors")
 
+# breseq validates the options and every path, then exits without running and without creating
+# anything -- 0 if it is happy, nonzero if not. Added in breseq-prerelease g23736ada, which
+# `tools.txt` pins for this reason.
+#
+# **It checks that options are known and that paths are usable, not that values make sense**:
+# measured, `-j notanumber` passes. So this catches the typo somebody makes in the arguments
+# box and a path nothing wrote, and does not pretend to be more.
+DRY_RUN_FLAG = "--dry-run"
+
 # What `mutint_import.breseq_folder` requires of a sample directory, and therefore what a run
 # must have produced before it is worth calling the importer. breseq 0.50 writes all five
 # itself, which is why nothing here reshapes anything -- but the check is still made, because
@@ -69,16 +78,26 @@ def split_arguments(text):
     return shlex.split(text or "")
 
 
-def build_argv(breseq, output_dir, reference, arguments, reads, processors=None):
+def build_argv(breseq, output_dir, reference, arguments, reads, processors=None,
+               dry_run=False):
     """The command line for one run.
 
     Order matters only in that `-o` and `-r` must precede the read files, which are
     positional. The typed arguments go between, so anything they set overrides the defaults
     ahead of them and nothing they set can be mistaken for a read file.
+
+    `dry_run` adds `--dry-run`, and **the preflight is otherwise this same command line** --
+    one builder, deliberately, because a preflight assembled separately would validate
+    something other than what runs. The single difference it cannot avoid is the read files:
+    the check happens before trimming, so it names the untrimmed reads, and at launch it names
+    a throwaway one because the upload has not been claimed yet. What it is checking is the
+    option string, which is identical in all three.
     """
     typed = split_arguments(arguments)
 
     argv = [breseq]
+    if dry_run:
+        argv.append(DRY_RUN_FLAG)
     # Injected only when the box does not already say. breseq's default is one processor,
     # which on a real genome is the difference between an evening and a week -- and a default
     # that cannot be overridden is worse than no default, so the box wins.
@@ -88,6 +107,30 @@ def build_argv(breseq, output_dir, reference, arguments, reads, processors=None)
     argv += typed
     argv += list(reads)
     return argv
+
+
+def refusal_from(output):
+    """The part of a failed dry run worth putting in front of a person.
+
+    breseq says why in one of two shapes, both measured against g23736ada:
+
+    - an option it does not know prints the **whole help** and then
+      `Unknown command argument option: no-such-flag` -- the useful line is the last one, and
+      the 45 before it are a manual nobody asked for;
+    - a path it cannot use prints `---> ERROR Input file for ... does not exist: ...` among the
+      paths it checked, then a summary line at the end.
+
+    So: every `ERROR` line, plus the last line. Falls back to the last line alone, which is
+    what a shape neither of those covers would still most likely put the reason on. The whole
+    output is in the job log either way -- this is only what fits in a sentence.
+    """
+    lines = [line.strip() for line in (output or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    wanted = [line for line in lines if "ERROR" in line]
+    if lines[-1] not in wanted:
+        wanted.append(lines[-1])
+    return "\n".join(wanted)
 
 
 def default_processors():

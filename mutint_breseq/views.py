@@ -10,6 +10,8 @@ import logging
 import os
 import re
 import shutil
+import subprocess
+import tempfile
 
 from django.http import Http404, JsonResponse
 from django.shortcuts import render
@@ -26,8 +28,10 @@ from mutint_experiment.permissions import (
     can_view_project,
     experiment_lock_refusal,
 )
+from mutint_common.tools import ToolMissing
 from mutint_import import reference_store, staging
 from mutint_jobs import jobs as jobs_api
+from mutint_jobs import processes
 from mutint_import.upload_session import UploadError
 
 from mutint_breseq import runner, tasks
@@ -157,6 +161,73 @@ def runs(request):
     return JsonResponse({"runs": _run_rows(experiment)})
 
 
+#: One FASTQ record, written only so `--dry-run` has an input file to find.
+#:
+#: breseq checks that every input file *exists*; it does not read them under `--dry-run`, and a
+#: minimal record is measured to satisfy it. A genuinely absent path would fail the check
+#: rather than pass it, which is why this is written rather than invented.
+PREFLIGHT_FASTQ = "@preflight\nACGTACGTAC\n+\nIIIIIIIIII\n"
+
+#: The preflight is option parsing and a handful of `stat` calls -- measured in milliseconds.
+#: A minute is not a budget, it is a guard against a breseq that never returns holding up a
+#: web request.
+PREFLIGHT_TIMEOUT_SECONDS = 60
+
+
+def _preflight(experiment, arguments):
+    """Ask breseq whether it would accept this command line. Returns a refusal, or None.
+
+    **Before the upload is claimed**, which is the whole point of doing it here: a rejected
+    launch must cost the person nothing, and by the time the reads have been moved out of
+    staging the only way to try again is to upload them again. So this names a throwaway FASTQ
+    of its own rather than the reads -- see `PREFLIGHT_FASTQ`.
+
+    The worker checks again before it trims (`tasks.run_breseq`), and that one is not
+    redundant: options cannot change in between, but `db_worker` may be on another host, and
+    the dry run is also what asks whether bowtie2, samtools and gnuplot are there. This one
+    asks about the box; that one asks about the machine.
+    """
+    try:
+        breseq = runner.breseq_path()
+    except ToolMissing as missing:
+        return str(missing)
+
+    reference = store.experiment_reference_path(experiment.id, store.REFERENCE_GFF3)
+
+    with tempfile.TemporaryDirectory() as scratch:
+        reads = os.path.join(scratch, "preflight.fastq")
+        with open(reads, "w") as handle:
+            handle.write(PREFLIGHT_FASTQ)
+        argv = runner.build_argv(breseq, os.path.join(scratch, "output"), reference,
+                                 arguments, [reads],
+                                 processors=runner.default_processors(), dry_run=True)
+        # `run_tool` writes to a file and hands back a returncode, so the output is captured by
+        # giving it one in the scratch directory. A launch has no job and so no job log, and
+        # this needs no capture mode in core.
+        log_path = os.path.join(scratch, "preflight.log")
+        try:
+            with open(log_path, "wb") as log:
+                returncode = processes.run_tool(
+                    argv, log, env=runner.tool_environment(),
+                    timeout=PREFLIGHT_TIMEOUT_SECONDS, what="breseq --dry-run")
+        except subprocess.TimeoutExpired:
+            return ("breseq did not answer within %d seconds when asked to check these "
+                    "options." % PREFLIGHT_TIMEOUT_SECONDS)
+        except OSError as exc:
+            return "breseq could not be started: %s" % exc
+
+        if returncode == 0:
+            return None
+
+        with open(log_path, "r") as handle:
+            output = handle.read()
+
+    logger.info("breseq refused a command line for experiment %s: %r",
+                experiment.id, arguments)
+    return ("breseq will not accept this command line:\n\n%s"
+            % (runner.refusal_from(output) or "it exited %d without saying why." % returncode))
+
+
 @require_POST
 def launch(request):
     """Take a staged drop and start a run.
@@ -204,6 +275,12 @@ def launch(request):
     except ValueError as exc:
         return JsonResponse({"error": "Those arguments could not be read: %s" % exc},
                             status=400)
+
+    # Asked of breseq itself, and asked here rather than after the upload is claimed so that a
+    # typo costs nothing: no run row, no reads moved, the session still open to launch again.
+    refusal = _preflight(experiment, arguments)
+    if refusal:
+        return JsonResponse({"error": refusal}, status=400)
 
     session, error = staging.session_for(request, payload.get("upload_id"), COMPONENT)
     if error:
