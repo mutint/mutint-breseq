@@ -103,6 +103,12 @@ The run list under the form updates itself while anything is in flight:
 - **Imported** — done, with links to the sample's **Mutations** and to breseq's own report.
 - **Failed** — with the reason, and breseq's output behind a fold.
 
+Every row also has a **log** link, which is what fastp and breseq have printed so far — the
+command line that was run, and their output as it arrives. It works while the run is going, so
+it is the way to see how far a long run has got; the page has a Refresh button rather than
+updating itself, and a Download for the whole log. How much has appeared is up to breseq,
+which writes in blocks rather than a line at a time.
+
 ## Stopping a run
 
 Every run appears on the **Jobs** page, reached from your username in the sidebar. While it is

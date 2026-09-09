@@ -172,9 +172,17 @@
         return '<span class="label label-default">Queued</span>' + note;
     }
 
+    // The job's own log page, for every run that has written anything -- including one that
+    // is still running, which is the case the fold below cannot serve because `run.log` is
+    // only filled in once the tools have finished.
+    function logLink(run) {
+        if (!run.log_url) { return ""; }
+        return '<a href="' + esc(run.log_url) + '">log</a>';
+    }
+
     function resultCell(run) {
+        var bits = [];
         if (run.status === "imported") {
-            var bits = [];
             if (run.sample_id) {
                 bits.push('<a href="/mutations/breseq?experiment_id=' + EXPERIMENT_ID +
                           "&sample_id=" + run.sample_id + '">Mutations</a>');
@@ -183,12 +191,12 @@
                 bits.push('<a href="' + run.report_url + '" target="_blank">' +
                           "breseq report</a>");
             }
-            return bits.join(" &middot; ") || "&mdash;";
+        } else if (run.error) {
+            bits.push('<span style="color: #a94442;">' + esc(run.error) + "</span>");
         }
-        if (run.error) {
-            return '<span style="color: #a94442;">' + esc(run.error) + "</span>";
-        }
-        return "&mdash;";
+        var log = logLink(run);
+        if (log) { bits.push(log); }
+        return bits.join(" &middot; ") || "&mdash;";
     }
 
     function detailRow(run) {

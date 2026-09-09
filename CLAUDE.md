@@ -31,7 +31,7 @@ a project's `.gitmodules` is how a component is not installed.
 
 | file | what |
 |---|---|
-| `runner.py` | pure: both argvs (fastp's and breseq's), the PATH, what counts as usable output, what to keep |
+| `runner.py` | pure: both argvs (fastp's and breseq's), the PATH, what counts as usable output, what to keep. It runs nothing -- `mutint_jobs.processes.run_tool` does |
 | `pairing.py` | pure: breseq's rule for which read files are mates, and which files fastp must not touch |
 | `tasks.py` | the `@task` — trim, run breseq, check, import, clean up |
 | `views.py` | the page, the launch endpoint, the run list |
@@ -104,9 +104,15 @@ this was written.
 
 The first `cancellable=True` task in the suite. The queue cannot interrupt a running task -- it
 has no cancel API, and its worker calls the function and looks at nothing again until it
-returns -- so `mutint_jobs` records a flag and `runner.run_breseq_process` polls it between
-slices of output. That is why `subprocess.run` is gone: it blocks until exit, so there is no
-moment at which anything could ask.
+returns -- so `mutint_jobs` records a flag and the run loop polls it while the tool runs. That
+is why `subprocess.run` is gone: it blocks until exit, so there is no moment at which anything
+could ask.
+
+**The loop is core's now.** It was `runner.run_breseq_process` and is
+`mutint_jobs.processes.run_tool`: polling a flag and signalling a process group is what any
+task shelling out from a worker needs, and none of it was breseq's. What stayed is what is --
+the argv, the PATH those binaries are found on, and what counts as output the importer can
+read. The process-group assertions moved with it, to `mutint_jobs/tests/test_processes.py`.
 
 **`start_new_session=True` and `os.killpg`, never `process.kill()`.** breseq spawns bowtie2 and
 samtools; killing only the parent leaves them running with no parent at all, and the job would
@@ -125,6 +131,27 @@ queue row), inside the run loop -- which fastp runs through as well as breseq --
 between trimming and breseq (a cancel that landed during fastp's last file would otherwise start
 an hours-long breseq), and while waiting for the import lock -- that wait can be half an hour,
 and a wait nobody can give up on is the same dead end as a job nobody can stop.
+
+### The log is the job's, and `BreseqRun.log` is its tail
+
+fastp and breseq both write into one file, opened once for the run:
+`<store>/components/mutint_jobs/<queue id>/job.log`, read at `/jobs/<pk>/log` **while the run
+is still going**. That is the point -- a twelve-hour run used to print nothing anybody could
+see until it ended, because the output sat in a pipe nobody drained until `communicate()`
+returned. The run list links there per run.
+
+`BreseqRun.log` stays, and stays the tail: it is what the failure messages embed, what the run
+list folds open, and what survives `./mutint reap_jobs` removing the `Job` row. It is filled
+from `logs.read_tail` when the tools are done rather than from a return value, so `_log_text`
+-- which joined fastp's account to breseq's by hand -- is gone: they are in the order they ran
+because they appended to one file in that order.
+
+**`_queue_id(context, run)` is why the task takes a context.** `BreseqRun.task_result_id` is
+written *after* `jobs.enqueue` returns, so a backend that runs the task inside `enqueue` --
+the suite's -- executes everything before that column is set, and both the log and the
+cancellation poll would silently do nothing. The `TaskContext` knows either way. A caller
+invoking the task directly passes `None` and gets neither, which is the honest answer for a
+run that is on no queue.
 
 ### Trimming is breseq's pairing rule, or it is wrong
 

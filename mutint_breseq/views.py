@@ -112,8 +112,14 @@ def _queue_status(run):
 
 
 def _run_rows(experiment):
+    runs = list(BreseqRun.objects.filter(experiment=experiment).select_related("sample"))
+    # One query for every run's log link, through core rather than by querying `Job` here: a
+    # plugin holds the queue's result id, which is what it was handed, and `mutint_jobs` owns
+    # the mapping from that to a page. Runs whose job has written nothing are simply absent.
+    log_urls = jobs_api.log_urls(run.task_result_id for run in runs)
+
     rows = []
-    for run in BreseqRun.objects.filter(experiment=experiment).select_related("sample"):
+    for run in runs:
         rows.append({
             "id": run.pk,
             "sample_name": run.sample_name,
@@ -133,6 +139,9 @@ def _run_rows(experiment):
             # exactly when the sample does.
             "report_url": ("/mutations/report/%d/" % run.sample_id
                            if run.sample_id else None),
+            # What the run's tools printed, whole and while they are still printing it. The
+            # `log` field beside this is the tail, and only after the run has finished.
+            "log_url": log_urls.get(run.task_result_id, ""),
         })
     return rows
 
@@ -240,7 +249,7 @@ def launch(request):
 
     # Through mutint_jobs rather than `task.enqueue` directly, which is what puts the run on
     # /jobs/ with a name and an owner and makes it stoppable. `cancellable=True` is a promise
-    # the task keeps -- see runner.run_breseq_process, which polls between slices of output.
+    # the task keeps -- see mutint_jobs.processes.run_tool, which polls while the tool runs.
     job = jobs_api.enqueue(
         tasks.run_breseq, run.pk,
         user=request.user,

@@ -19,9 +19,10 @@ from mutint_common import store
 from mutint_experiment.models import Project
 from mutint_import import staging
 from mutint_import.tests import breseq_fixture
+from mutint_jobs import logs
 from mutint_sample.models import Mutation, MutationCall, Sample
 
-from mutint_breseq import runner
+from mutint_breseq import runner, tasks
 from mutint_breseq.models import STATUS_FAILED, STATUS_IMPORTED, BreseqRun
 from mutint_breseq.tests import fake_breseq, fake_fastp
 from mutint_breseq.tests.test_launch import establish_reference
@@ -97,6 +98,71 @@ class RunTestCase(TestCase):
             return []
         with open(self.fastp_record) as handle:
             return [json.loads(line) for line in handle if line.strip()]
+
+    def _job_logs(self):
+        """Every job log under the store, as text.
+
+        Read through `logs.read_tail` rather than by opening a filename, because a finished
+        job's log is gzipped by the `task_finished` receiver and a running one is not -- which
+        is exactly the distinction these tests are about. Keyed by the queue's id, which the
+        run row does not carry until after `jobs.enqueue` returns, so this reads them all.
+        """
+        root = os.path.join(self.store, "components", "mutint_jobs")
+        found = {}
+        for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+            text, _truncated = logs.read_tail(name)
+            if text:
+                found[name] = text
+        return found
+
+    # --- the log ------------------------------------------------------------------------
+
+    def test_the_log_can_be_read_while_the_tool_is_still_running(self):
+        """The whole reason the output goes to a file instead of a pipe.
+
+        Nothing could assert this before: `run_breseq_process` held everything in a pipe until
+        the process exited, so a run three hours in had printed nothing anybody could see. The
+        cancellation poll is used as the "during" moment because it is the one hook that fires
+        while the subprocess is alive.
+        """
+        os.environ["FAKE_BRESEQ_SLEEP"] = "1"
+        os.environ["FAKE_BRESEQ_PIDS"] = os.path.join(self.template_root, "pids.json")
+        self.addCleanup(os.environ.pop, "FAKE_BRESEQ_SLEEP", None)
+        self.addCleanup(os.environ.pop, "FAKE_BRESEQ_PIDS", None)
+
+        seen = {}
+
+        # `side_effect` is called with the mocked function's own arguments, so this takes the
+        # queue id even though it does not use it.
+        def look_then_cancel(task_result_id):
+            if not seen:
+                seen.update(self._job_logs())
+            return bool(seen)
+
+        with mock.patch.object(tasks.jobs, "is_cancelled", side_effect=look_then_cancel):
+            self._launch()
+
+        self.assertTrue(seen, "no log existed while breseq was running")
+        written = "\n".join(seen.values())
+        self.assertIn("$ ", written, "the command line is not in the log")
+        self.assertIn("breseq", written)
+
+    def test_the_log_holds_both_tools_in_the_order_they_ran(self):
+        """fastp's account precedes breseq's because both append to one file, not because
+        anything joins two strings in that order any more."""
+        self._launch()
+
+        written = "\n".join(self._job_logs().values())
+        self.assertLess(written.index("fastp"), written.index("SUCCESSFULLY COMPLETED"))
+
+    def test_the_log_survives_a_successful_run_s_cleanup(self):
+        """It lives under `components/mutint_jobs/`, not under the run's own directory, which
+        `cleanup_after_import` empties."""
+        self._launch()
+        run = BreseqRun.objects.get()
+
+        self.assertEqual(run.status, STATUS_IMPORTED, run.error)
+        self.assertTrue(self._job_logs(), "the log went with the run directory")
 
     # --- the happy path -----------------------------------------------------------------
 
@@ -380,8 +446,8 @@ class RunTestCase(TestCase):
         run = BreseqRun.objects.get()
 
         with self.assertRaises(RuntimeError):
-            tasks.run_breseq.call(run.pk)
+            tasks.run_breseq.call(None, run.pk)
 
     def test_a_run_deleted_before_the_worker_reaches_it_is_not_an_error(self):
         from mutint_breseq import tasks
-        self.assertIsNone(tasks.run_breseq.call(999999))
+        self.assertIsNone(tasks.run_breseq.call(None, 999999))

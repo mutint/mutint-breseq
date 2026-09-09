@@ -46,7 +46,7 @@ STATUS_CHOICES = [
 # because the process belongs to the worker -- and a status the product cannot enforce is a
 # button that lies. That was true of the *queue*, which still offers no way to interrupt a
 # running task, and it stopped being true of this plugin when the run loop began asking. The
-# task stops itself; see runner.run_breseq_process. Keep the two joined: if the polling ever
+# task stops itself; see mutint_jobs.processes.run_tool. Keep the two joined: if the polling ever
 # goes, so must this status.
 
 FINISHED_STATUSES = (STATUS_IMPORTED, STATUS_FAILED, STATUS_CANCELLED)

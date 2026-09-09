@@ -1,18 +1,16 @@
-"""Stopping a run, and stopping *everything* it started.
+"""Stopping a run: the whole path, from the button to what is left on disk.
 
 The queue offers no way to interrupt a running task, so all of this rests on the run loop
-asking. These tests exercise the loop against a real process, because the failure worth
-catching -- signalling the parent and leaving its children alive -- is invisible to anything
-that mocks the subprocess away.
+asking. **The loop itself is tested in core** -- `mutint_jobs.tests.test_processes`, which is
+where `run_tool` lives and where the process-group assertions went with it. What is left here
+is what this plugin decides: that a cancellation is not a failure, that it throws the work
+away, and that the page stops offering the button.
 """
 
 import json
 import os
 import shutil
-import signal
-import subprocess
 import tempfile
-import time
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -23,122 +21,13 @@ from mutint_experiment.models import Project
 from mutint_import import staging
 from mutint_import.tests import breseq_fixture
 from mutint_jobs import jobs as jobs_api
+# The process-group helpers live with the loop they were written for, in core.
+from mutint_jobs.tests.test_processes import wait_until_gone
 
-from mutint_breseq import runner, tasks
+from mutint_breseq import tasks
 from mutint_breseq.models import STATUS_CANCELLED, BreseqRun
 from mutint_breseq.tests import fake_breseq, fake_fastp
 from mutint_breseq.tests.test_launch import establish_reference
-
-
-def alive(pid):
-    """Whether `pid` is a live process. Signal 0 checks without delivering anything."""
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
-        return False
-    return True
-
-
-def wait_until_gone(pid, seconds=10):
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        if not alive(pid):
-            return True
-        time.sleep(0.05)
-    return not alive(pid)
-
-
-class ProcessGroupTestCase(TestCase):
-    """`run_breseq_process` alone, with no database and no task."""
-
-    def setUp(self):
-        self.tools = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.tools, True)
-        self.work = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.work, True)
-
-        fake_breseq.install(self.tools)
-        self.pids_file = os.path.join(self.work, "pids.json")
-        self.env = dict(os.environ, **{
-            "FAKE_BRESEQ_TEMPLATE": self.work,
-            "FAKE_BRESEQ_ARGV": os.path.join(self.work, "argv.json"),
-            "FAKE_BRESEQ_SLEEP": "1",
-            "FAKE_BRESEQ_PIDS": self.pids_file,
-        })
-        self.breseq = os.path.join(self.tools, "bin", "breseq")
-
-    def _pids(self, seconds=10):
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            if os.path.isfile(self.pids_file) and os.path.getsize(self.pids_file):
-                with open(self.pids_file) as handle:
-                    try:
-                        return json.load(handle)
-                    except ValueError:
-                        pass
-            time.sleep(0.05)
-        self.fail("the fake breseq never reported its pids")
-
-    def test_cancelling_kills_the_process_and_its_children(self):
-        """The assertion the whole `killpg` design exists for.
-
-        `process.kill()` would pass a test that checked only the parent, and would leave
-        bowtie2 and samtools running on a real machine while the page said the job had
-        stopped. So the child is asserted dead too.
-        """
-        pids = {}
-
-        def is_cancelled():
-            # Cancel as soon as the fake has spawned its child and told us both pids.
-            if not pids:
-                pids.update(self._pids())
-            return True
-
-        with self.assertRaises(runner.Cancelled):
-            runner.run_breseq_process(
-                [self.breseq, "-o", os.path.join(self.work, "out"), "-r", "ref.gff3"],
-                self.env, timeout=60, is_cancelled=is_cancelled, poll_seconds=0.1)
-
-        self.assertTrue(wait_until_gone(pids["parent"]), "breseq itself survived")
-        self.assertTrue(wait_until_gone(pids["child"]),
-                        "a child of breseq survived -- the signal did not reach the group")
-
-    def test_a_run_nobody_cancels_completes_normally(self):
-        env = dict(self.env)
-        env.pop("FAKE_BRESEQ_SLEEP")
-        os.makedirs(os.path.join(self.work, "data"), exist_ok=True)
-
-        returncode, output = runner.run_breseq_process(
-            [self.breseq, "-o", os.path.join(self.work, "out"), "-r", "ref.gff3"],
-            env, timeout=60, is_cancelled=lambda: False, poll_seconds=0.1)
-
-        self.assertEqual(0, returncode)
-        self.assertIn("SUCCESSFULLY COMPLETED", output)
-
-    def test_the_timeout_also_stops_the_group(self):
-        pids = {}
-
-        def capture():
-            if not pids:
-                pids.update(self._pids())
-            return False
-
-        with self.assertRaises(subprocess.TimeoutExpired):
-            runner.run_breseq_process(
-                [self.breseq, "-o", os.path.join(self.work, "out"), "-r", "ref.gff3"],
-                self.env, timeout=1, is_cancelled=capture, poll_seconds=0.1)
-
-        self.assertTrue(wait_until_gone(pids["parent"]))
-        self.assertTrue(wait_until_gone(pids["child"]))
-
-    def test_no_cancellation_callback_is_allowed(self):
-        # A task that does not offer to be cancelled still has to be runnable.
-        env = dict(self.env)
-        env.pop("FAKE_BRESEQ_SLEEP")
-        returncode, _ = runner.run_breseq_process(
-            [self.breseq, "-o", os.path.join(self.work, "out"), "-r", "ref.gff3"],
-            env, timeout=60, poll_seconds=0.1)
-        self.assertEqual(0, returncode)
 
 
 DATABASE_BACKEND = {"default": {"BACKEND": "django_tasks_db.DatabaseBackend"}}
@@ -216,7 +105,7 @@ class CancelledRunTestCase(TestCase):
         job = jobs_api.for_user(self.owner).get(task_result_id=run.task_result_id)
         jobs_api.request_cancel(job, by=self.owner)
 
-        self.assertIsNone(tasks.run_breseq.call(run.pk))
+        self.assertIsNone(tasks.run_breseq.call(None, run.pk))
 
         run.refresh_from_db()
         self.assertEqual(run.status, STATUS_CANCELLED)
@@ -233,7 +122,7 @@ class CancelledRunTestCase(TestCase):
         job = jobs_api.for_user(self.owner).get(task_result_id=run.task_result_id)
         jobs_api.request_cancel(job, by=self.owner)
 
-        tasks.run_breseq.call(run.pk)          # does not raise
+        tasks.run_breseq.call(None, run.pk)          # does not raise
 
         run.refresh_from_db()
         self.assertEqual(run.error, "")
@@ -266,7 +155,7 @@ class CancelledRunTestCase(TestCase):
         # Not cancelled at entry; cancelled at every poll after it. The first poll is the one
         # inside the fastp loop, two seconds in.
         with mock.patch.object(tasks.jobs, "is_cancelled", side_effect=[False] + [True] * 50):
-            self.assertIsNone(tasks.run_breseq.call(run.pk))
+            self.assertIsNone(tasks.run_breseq.call(None, run.pk))
 
         run.refresh_from_db()
         self.assertEqual(run.status, STATUS_CANCELLED)
@@ -284,7 +173,7 @@ class CancelledRunTestCase(TestCase):
         run = BreseqRun.objects.get()
         job = jobs_api.for_user(self.owner).get(task_result_id=run.task_result_id)
         jobs_api.request_cancel(job, by=self.owner)
-        tasks.run_breseq.call(run.pk)
+        tasks.run_breseq.call(None, run.pk)
 
         response = self.client.post("/breseq/run/%d/delete" % run.pk)
         self.assertEqual(response.status_code, 200)
