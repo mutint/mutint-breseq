@@ -262,7 +262,9 @@ def run_breseq(context, run_id):
         # `reads` is still the untrimmed list here, which is what the dry run wants: the
         # trimmed copies do not exist yet, and breseq checks that its inputs do.
         argv = runner.build_argv(breseq, run.output_dir(), reference, run.arguments, reads,
-                                 processors=runner.default_processors(), dry_run=True)
+                                 processors=runner.default_processors(), dry_run=True,
+                                 polymorphism=run.population_sample,
+                                 coverage_limit=run.coverage_limit)
         try:
             returncode = processes.run_tool(
                 argv, log, env=runner.tool_environment(),
@@ -318,7 +320,9 @@ def run_breseq(context, run_id):
                 return None
 
         argv = runner.build_argv(breseq, run.output_dir(), reference, run.arguments, reads,
-                                 processors=runner.default_processors())
+                                 processors=runner.default_processors(),
+                                 polymorphism=run.population_sample,
+                                 coverage_limit=run.coverage_limit)
         logger.info("breseq run %s starting: %s", run.pk, " ".join(argv))
 
         try:
@@ -389,6 +393,8 @@ def run_breseq(context, run_id):
         raise RuntimeError("import refused run %s: %s" % (run.pk, entry["error"]))
 
     sample = _imported_sample(experiment, run.sample_name)
+    if run.population_sample:
+        _mark_population_sample(sample)
     # Everything worth keeping -- data/'s four files and breseq's HTML report -- is already in
     # the store under the sample, put there by the importer above.
     runner.cleanup_after_import(run.directory(), run.output_dir())
@@ -401,6 +407,34 @@ def run_breseq(context, run_id):
     logger.info("breseq run %s imported %s mutations as sample %s",
                 run.pk, entry.get("mutations"), getattr(sample, "pk", None))
     return entry.get("mutations")
+
+
+def _mark_population_sample(sample):
+    """Record that this sample is a population rather than a clone.
+
+    **Core's importer already has a rule for this and it is not enough on its own.**
+    `gd_import` reads ` -p` out of the `.gd`'s `#=COMMAND` line, which is the right rule for a
+    folder somebody analysed elsewhere and dropped on the Import data page -- but it writes
+    `is_clonal` inside a `get_or_create(defaults=...)`, so **a run over a sample the experiment
+    already holds never reaches it**. Re-running breseq with better options is exactly what
+    this page is for, and the launcher says so. It also matches only the short spelling, and
+    only where breseq wrote a `#=COMMAND` at all.
+
+    So the checkbox is asserted here, where the run knows what was asked for.
+
+    **It never writes True.** An unticked box is not a claim that the sample is a clone: the
+    person may have typed `-p` into the arguments box themselves, in which case core's rule has
+    already marked it and this must not undo that. Same reason the write is skipped when the
+    sample is already mixed -- there is nothing to say.
+
+    `sample` may be None, which `_imported_sample` documents as a real answer: the import
+    happened and the row could not be found afterwards. There is nothing to mark and nothing
+    to fail over.
+    """
+    if sample is None or not sample.is_clonal:
+        return
+    sample.is_clonal = False
+    sample.save(update_fields=["is_clonal"])
 
 
 def _imported_sample(experiment, sample_name):

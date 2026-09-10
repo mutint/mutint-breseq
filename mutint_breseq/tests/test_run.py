@@ -84,7 +84,8 @@ class RunTestCase(TestCase):
         return session
 
     def _launch(self, sample="s1", population="", time_point="", arguments="",
-                names=("s1_R1.fastq", "s1_R2.fastq"), trim_reads=None, content="ACGT"):
+                names=("s1_R1.fastq", "s1_R2.fastq"), trim_reads=None, content="ACGT",
+                population_sample=None, coverage_limit=None):
         """The endpoint takes the three parts of a coordinate, not a joined name: the server
         composes. `sample` alone is the unplaced case, which is what most of these want."""
         session = self._stage(names, content=content)
@@ -93,6 +94,10 @@ class RunTestCase(TestCase):
                 "arguments": arguments}
         if trim_reads is not None:
             body["trim_reads"] = trim_reads
+        if population_sample is not None:
+            body["population_sample"] = population_sample
+        if coverage_limit is not None:
+            body["coverage_limit"] = coverage_limit
         return self.client.post(
             "/breseq/launch?experiment_id=%s" % self.experiment.id,
             data=json.dumps(body), content_type="application/json")
@@ -410,6 +415,74 @@ class RunTestCase(TestCase):
         argv = self._recorded_argv()["argv"]
         self.assertIn("-p", argv)
         self.assertIn("--polymorphism-minimum-variant-coverage", argv)
+
+    # --- population samples ---------------------------------------------------------------
+
+    def test_the_checkbox_reaches_both_breseq_calls(self):
+        """The preflight has to validate the command line that will actually run."""
+        self._launch(population_sample=True)
+
+        self.assertIn("-p", self._recorded_argv()["argv"])
+        self.assertIn("-p", self._recorded_dry_runs()[-1]["argv"])
+
+    def test_a_population_sample_is_imported_as_one(self):
+        response = self._launch(population_sample=True)
+
+        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        self.assertEqual(run.status, STATUS_IMPORTED, run.error)
+        self.assertTrue(run.population_sample)
+        self.assertFalse(Sample.objects.get(pk=run.sample_id).is_clonal)
+
+    def test_a_sample_is_clonal_unless_the_box_is_ticked(self):
+        response = self._launch()
+
+        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        self.assertFalse(run.population_sample)
+        self.assertTrue(Sample.objects.get(pk=run.sample_id).is_clonal)
+
+    def test_re_running_a_clone_as_a_population_changes_what_it_is(self):
+        """The case core's `#=COMMAND` rule structurally cannot reach.
+
+        That rule sets `is_clonal` inside a `get_or_create(defaults=...)`, so importing over a
+        sample the experiment already holds leaves the old value in place -- and re-running
+        breseq with better options, superseding the sample, is what this page is for.
+        """
+        first = self._launch()
+        sample_id = BreseqRun.objects.get(pk=first.json()["run_id"]).sample_id
+        self.assertTrue(Sample.objects.get(pk=sample_id).is_clonal)
+
+        self._launch(population_sample=True)
+
+        # The same sample, superseded rather than a second one beside it.
+        self.assertEqual(
+            Sample.objects.filter(population__experiment=self.experiment).count(), 1)
+        self.assertFalse(Sample.objects.get(pk=sample_id).is_clonal)
+
+    def test_the_run_list_says_a_run_was_a_population_sample(self):
+        self._launch(population_sample=True)
+        rows = self.client.get("/breseq/runs?experiment_id=%s" % self.experiment.id).json()
+        self.assertTrue(rows["runs"][0]["population_sample"])
+
+    # --- limiting coverage ------------------------------------------------------------------
+
+    def test_a_coverage_limit_reaches_both_breseq_calls(self):
+        self._launch(coverage_limit="80")
+
+        for call in (self._recorded_argv(), self._recorded_dry_runs()[-1]):
+            argv = call["argv"]
+            self.assertEqual(argv[argv.index("-l") + 1], "80")
+
+    def test_a_blank_coverage_limit_means_every_read(self):
+        response = self._launch(coverage_limit="")
+
+        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        self.assertIsNone(run.coverage_limit)
+        self.assertNotIn("-l", self._recorded_argv()["argv"])
+
+    def test_the_run_list_says_what_the_coverage_was_limited_to(self):
+        self._launch(coverage_limit="62.5")
+        rows = self.client.get("/breseq/runs?experiment_id=%s" % self.experiment.id).json()
+        self.assertEqual(rows["runs"][0]["coverage_limit"], 62.5)
 
     def test_the_tools_directory_is_on_the_path_breseq_sees(self):
         # breseq shells out to bowtie2 and samtools by bare name and exits 0 when it cannot

@@ -76,6 +76,18 @@ class BreseqRun(models.Model):
     # rather than read from a setting so a row says what was actually done to its reads.
     # Runs from before the option existed carry False, which is the truth about them.
     trim_reads = models.BooleanField(default=True)
+    # Whether this was launched as a population -- a whole evolving population sequenced
+    # together -- rather than a clone. Two effects, deliberately joined: `-p` goes on breseq's
+    # command line, and the sample the import produces is recorded `is_clonal=False`. Kept per
+    # run for the reason `trim_reads` is: the row says what was actually asked for. Runs from
+    # before the option existed carry False, which is the truth about them.
+    population_sample = models.BooleanField(default=False)
+    # breseq's `-l`: analyze only enough reads to reach this fold coverage. **Null is a real
+    # value** -- it means every read, which is breseq's own default -- so this is nullable
+    # rather than 0, which would be a coverage limit of nothing. A float because breseq takes
+    # one; whole numbers are the realistic case and `runner.format_coverage_limit` is what
+    # keeps `80` from reaching the command line as `80.0`.
+    coverage_limit = models.FloatField(null=True, blank=True)
     # The basenames dropped, so the run list can say what it was given after the reads are
     # deleted. Not paths: nothing resolves these, they are for a person to read.
     read_files = models.JSONField(default=list)

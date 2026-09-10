@@ -71,15 +71,18 @@ class LaunchTestCase(TestCase):
         return session
 
     def _launch(self, upload_id, sample="s1", population="", time_point="", arguments="",
-                experiment_id=None):
+                experiment_id=None, coverage_limit=None):
+        body = {"upload_id": str(upload_id),
+                "sample": sample,
+                "population": population,
+                "time_point": time_point,
+                "arguments": arguments}
+        if coverage_limit is not None:
+            body["coverage_limit"] = coverage_limit
         return self.client.post(
             "/breseq/launch?experiment_id=%s" % (
                 self.experiment.id if experiment_id is None else experiment_id),
-            data=json.dumps({"upload_id": str(upload_id),
-                             "sample": sample,
-                             "population": population,
-                             "time_point": time_point,
-                             "arguments": arguments}),
+            data=json.dumps(body),
             content_type="application/json")
 
     # --- the page -----------------------------------------------------------------------
@@ -184,6 +187,26 @@ class LaunchTestCase(TestCase):
         response = self._launch(session.id, arguments='--name "unterminated')
         self.assertEqual(response.status_code, 400)
         self.assertIn("could not be read", response.json()["error"])
+
+    def test_a_coverage_limit_that_is_not_a_number_is_refused(self):
+        # `type="number"` is the browser's guard and neither a promise nor the only client.
+        session = self._stage()
+        response = self._launch(session.id, coverage_limit="eighty")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["field"], "coverage_limit")
+        self.assertEqual(BreseqRun.objects.count(), 0)
+
+    def test_a_coverage_limit_of_zero_or_less_is_refused(self):
+        for value in ("0", "-10"):
+            response = self._launch(self._stage().id, coverage_limit=value)
+            self.assertEqual(response.status_code, 400, value)
+            self.assertIn("greater than zero", response.json()["error"])
+
+    def test_infinity_and_nan_are_refused(self):
+        # `float()` takes both, and they would reach breseq's command line as words.
+        for value in ("inf", "nan"):
+            response = self._launch(self._stage().id, coverage_limit=value)
+            self.assertEqual(response.status_code, 400, value)
 
     def test_another_experiments_upload_is_refused(self):
         # Two ids arrive from the client and nothing else pairs them.

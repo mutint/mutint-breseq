@@ -7,6 +7,7 @@ Django ``Form`` classes -- there are two fields and a file drop.
 
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -194,6 +195,8 @@ def _run_rows(experiment):
             "arguments": run.arguments,
             "read_files": run.read_files,
             "trim_reads": run.trim_reads,
+            "population_sample": run.population_sample,
+            "coverage_limit": run.coverage_limit,
             "status": run.status,
             "queue_status": _queue_status(run),
             "created_at": run.created_at.isoformat(),
@@ -238,7 +241,38 @@ PREFLIGHT_FASTQ = "@preflight\nACGTACGTAC\n+\nIIIIIIIIII\n"
 PREFLIGHT_TIMEOUT_SECONDS = 60
 
 
-def _preflight(experiment, arguments):
+class CoverageLimitError(Exception):
+    """The Limit coverage box did not hold a number this can be run with."""
+
+
+def _coverage_limit(raw):
+    """The Limit coverage box as a float, or None for blank. Raises CoverageLimitError.
+
+    **Blank is a value and it is the default**: no limit, every read, which is what breseq
+    does when `-l` is absent. So the empty box has to be told apart from a bad one rather than
+    both collapsing to "nothing to do".
+
+    `float()` is not the whole check. It accepts `nan` and `inf`, which would reach breseq's
+    command line as words and be refused hours later by a worker rather than here; and a
+    limit of zero or less is a number that means nothing anybody wants.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        raise CoverageLimitError(
+            "Limit coverage has to be a number, or blank to use every read.")
+    if not math.isfinite(value) or value <= 0:
+        raise CoverageLimitError(
+            "Limit coverage has to be greater than zero, or blank to use every read.")
+    return value
+
+
+def _preflight(experiment, arguments, polymorphism=False, coverage_limit=None):
     """Ask breseq whether it would accept this command line. Returns a refusal, or None.
 
     **Before the upload is claimed**, which is the whole point of doing it here: a rejected
@@ -264,7 +298,8 @@ def _preflight(experiment, arguments):
             handle.write(PREFLIGHT_FASTQ)
         argv = runner.build_argv(breseq, os.path.join(scratch, "output"), reference,
                                  arguments, [reads],
-                                 processors=runner.default_processors(), dry_run=True)
+                                 processors=runner.default_processors(), dry_run=True,
+                                 polymorphism=polymorphism, coverage_limit=coverage_limit)
         # `run_tool` writes to a file and hands back a returncode, so the output is captured by
         # giving it one in the scratch directory. A launch has no job and so no job log, and
         # this needs no capture mode in core.
@@ -296,7 +331,9 @@ def _preflight(experiment, arguments):
 def launch(request):
     """Take a staged drop and start a run.
 
-    Body: {upload_id, sample_name, arguments, trim_reads}; `trim_reads` defaults to true.
+    Body: {upload_id, sample_name, arguments, trim_reads, population_sample,
+    coverage_limit}; `trim_reads` defaults to true, `population_sample` to false, and
+    `coverage_limit` is blank for every read.
 
     Gated on `can_edit_experiment` and **not** `can_edit_project`: what this eventually writes
     is a sample everybody sees, so a locked experiment has to refuse it, and a predicate handed
@@ -352,9 +389,23 @@ def launch(request):
         return JsonResponse({"error": "Those arguments could not be read: %s" % exc},
                             status=400)
 
+    # The Population sample checkbox. It decides two things at once -- `-p` on breseq's
+    # command line, and the clonality the imported sample is recorded with -- so it is read
+    # here, before the preflight, and stored on the row rather than derived later from the
+    # arguments string.
+    population_sample = bool(payload.get("population_sample", False))
+
+    # Checked here rather than left to breseq, which takes `-l notanumber` past its own dry
+    # run -- measured -- and fails on it hours later. `field` so the page can point at the box.
+    try:
+        coverage_limit = _coverage_limit(payload.get("coverage_limit"))
+    except CoverageLimitError as refusal:
+        return JsonResponse({"error": str(refusal), "field": "coverage_limit"}, status=400)
+
     # Asked of breseq itself, and asked here rather than after the upload is claimed so that a
     # typo costs nothing: no run row, no reads moved, the session still open to launch again.
-    refusal = _preflight(experiment, arguments)
+    refusal = _preflight(experiment, arguments, polymorphism=population_sample,
+                         coverage_limit=coverage_limit)
     if refusal:
         return JsonResponse({"error": refusal}, status=400)
 
@@ -382,6 +433,8 @@ def launch(request):
         sample_name=sample_name,
         arguments=arguments,
         trim_reads=bool(payload.get("trim_reads", True)),
+        population_sample=population_sample,
+        coverage_limit=coverage_limit,
         status=STATUS_QUEUED)
 
     try:

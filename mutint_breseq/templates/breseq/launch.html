@@ -90,6 +90,50 @@
         </div>
         <small class="help-block" id="breseq-identity-note" style="margin-top: -0.5em;"></small>
 
+        {% comment %} Above the arguments box because it is the question people actually have
+           -- clone or population -- rather than a flag to remember. Ticked it does two things
+           at once: `-p` on breseq's command line, and the sample recorded as a population.
+           A `-p` already in the box is left exactly as typed and not repeated. {% endcomment %}
+        <div class="checkbox" style="margin-bottom: 1em;">
+            <label>
+                <input type="checkbox" id="breseq-population-sample">
+                Population sample (run with <code>-p</code>)
+            </label>
+            <small class="help-block" style="margin-top: 0;">
+                A whole evolving population sequenced together rather than a clone. breseq
+                runs in polymorphism mode, so mutations carry frequencies, and the sample is
+                recorded as a population. If you have already typed <code>-p</code> or
+                <code>--polymorphism-prediction</code> below it is left as you wrote it.
+            </small>
+        </div>
+
+        {% comment %} The checkbox is what says whether coverage is limited at all, and the
+           box beside it is only how much. An empty box would have had to carry both, which
+           reads as an unfilled field rather than as a decision -- and a typo that a
+           `type="number"` input reports as empty would then be indistinguishable from it.
+
+           The number is still the only thing posted: unticked sends blank, and blank is
+           already what "every read" means to the server. One fact, one value, no boolean
+           beside it to disagree. `type="number"` so the browser refuses letters and phones
+           offer a numeric keypad; the server checks it too, neither being a guarantee.
+           {% endcomment %}
+        <div class="checkbox" style="margin-bottom: 0.5em;">
+            <label style="padding-right: 0.5em;">
+                <input type="checkbox" id="breseq-limit-coverage">
+                Limit coverage to
+            </label>
+            <input type="number" class="form-control" id="breseq-coverage-limit"
+                   min="1" step="any" inputmode="decimal" autocomplete="off" disabled
+                   style="display: inline-block; width: 7em; vertical-align: middle;"><span
+            >-fold</span>
+        </div>
+        <small class="help-block" style="margin-top: 0;">
+            Left unticked, breseq uses <b>every read</b>, which is its default. Ticked, it
+            analyzes only enough reads to reach the coverage you name, which is faster with no
+            loss of sensitivity &mdash; <b>60&ndash;80</b> is the recommendation for clonal
+            samples. Passed as <code>-l</code>.
+        </small>
+
         <div class="form-group">
             <label for="breseq-arguments">breseq arguments <small>(optional)</small></label>
             <input type="text" class="form-control" id="breseq-arguments"
@@ -243,6 +287,12 @@
 
     function detailRow(run) {
         var parts = [];
+        if (run.population_sample) {
+            parts.push("<b>Population sample</b> <code>-p</code>");
+        }
+        if (run.coverage_limit) {
+            parts.push("<b>Coverage limit</b> " + esc(run.coverage_limit) + "-fold");
+        }
         if (run.arguments) {
             parts.push("<b>Arguments</b> <code>" + esc(run.arguments) + "</code>");
         }
@@ -462,6 +512,30 @@
         input.addEventListener("blur", splitFromName);
     });
     var trimInput = document.getElementById("breseq-trim-reads");
+    // Not `populationInput`, which is the Population *name* box above -- two different
+    // meanings of the word, a few lines apart.
+    var populationSampleInput = document.getElementById("breseq-population-sample");
+    var coverageLimitInput = document.getElementById("breseq-coverage-limit");
+    var limitCoverageInput = document.getElementById("breseq-limit-coverage");
+
+    // The checkbox owns whether there is a limit; the box owns how much. Ticking it fills in
+    // the middle of the recommended range rather than leaving an enabled empty box, which
+    // would be a third state saying nothing. Unticking leaves the number where it is -- it is
+    // visibly disabled, and not sent -- so changing your mind twice costs no typing.
+    var DEFAULT_COVERAGE_LIMIT = "80";
+
+    function syncCoverageLimit() {
+        coverageLimitInput.disabled = !limitCoverageInput.checked;
+        if (limitCoverageInput.checked) {
+            if (!coverageLimitInput.value) {
+                coverageLimitInput.value = DEFAULT_COVERAGE_LIMIT;
+            }
+            coverageLimitInput.focus();
+            coverageLimitInput.select();
+        }
+    }
+
+    limitCoverageInput.addEventListener("change", syncCoverageLimit);
     var errorEl = document.getElementById("breseq-error");
     var progressEl = document.getElementById("breseq-progress");
     var progressBar = document.getElementById("breseq-progress-bar");
@@ -529,6 +603,19 @@
         e.preventDefault();
         if (!selected.length) { return; }
         errorEl.innerHTML = "";
+        // Only when a limit was asked for -- a disabled input is barred from constraint
+        // validation and always reports itself valid, so the checkbox has to be asked first.
+        //
+        // The form is submitted through JS, so the browser's own validation never runs, and a
+        // `type="number"` box holding something it will not parse reports an **empty** value.
+        // Ticked-and-empty would therefore post as "every read", which is the opposite of
+        // what the tick said. Asked before the upload, so a typo costs nothing at all.
+        if (limitCoverageInput.checked && !coverageLimitInput.checkValidity()) {
+            renderError("Limit coverage to a number greater than zero, or untick the box to " +
+                        "use every read.");
+            coverageLimitInput.focus();
+            return;
+        }
         submitBtn.disabled = true;
         setProgress(0, 1, "Preparing…");
 
@@ -545,7 +632,12 @@
                 time_point: timePointInput.value,
                 sample: sampleInput.value,
                 arguments: argsInput.value,
-                trim_reads: trimInput.checked
+                trim_reads: trimInput.checked,
+                population_sample: populationSampleInput.checked,
+                // The number alone: unticked sends blank, which is already how the server
+                // spells "every read". Nothing posts the checkbox itself, so the two can
+                // never arrive disagreeing.
+                coverage_limit: limitCoverageInput.checked ? coverageLimitInput.value : ""
             });
         }).then(function (body) {
             progressEl.style.display = "none";

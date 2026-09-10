@@ -139,6 +139,79 @@ earlier work.
 with a different sample each time, so emptying those would make the common case the one that
 costs the most typing.
 
+### Population sample is one checkbox and two assertions
+
+**Population sample (run with `-p`)** sits above the arguments box, and ticking it does two
+things that have to travel together: `-p` goes on breseq's command line, and the sample the
+import produces is recorded `is_clonal=False`. Either one alone is a half-answer -- polymorphism
+mode with the sample filed as a clone, or a sample called a population that breseq never called
+polymorphisms in.
+
+**The argv half mirrors `-j` exactly.** `POLYMORPHISM_FLAGS` carries both spellings and
+`build_argv(polymorphism=True)` injects `-p` only where the box does not already say. breseq
+would take a duplicate happily -- it is a boolean flag, unlike `-j`, where the last one silently
+wins -- so the reason not to add one is that a command line saying `-p` twice reads as the page
+having ignored what was typed. It is injected with the other defaults, ahead of the typed
+arguments, so the box stays the last word.
+
+**The clonality half is asserted here, and core already has a rule for it.**
+`gd_import` reads ` -p` out of the `.gd`'s `#=COMMAND` line, which is the right rule for a
+folder analysed elsewhere and dropped on the Import data page. It is not enough for this page,
+for a reason that is not a defect in it: it writes `is_clonal` inside a
+`get_or_create(defaults=...)`, so **a run over a sample the experiment already holds never
+reaches it** -- and re-running breseq with better options, superseding the sample, is exactly
+what this page advertises. It also matches only the short spelling, and only where breseq wrote
+a `#=COMMAND` at all. So `tasks._mark_population_sample` says it outright.
+
+**It never writes `True`.** An unticked box is not a claim that the sample is a clone: somebody
+may have typed `-p` into the arguments box, in which case core's rule has already marked it and
+writing True would undo that. The checkbox asserts one thing in one direction, which is the
+whole of what it knows.
+
+**This is a shared write**, so it belongs behind `can_edit_experiment` -- which `launch`
+already checks, and which is the only gate a run has.
+
+### Limit coverage is a box because the value is a decision, not a flag
+
+`-l` is the second option promoted out of the arguments box, and the third injection rule in
+`build_argv` after `-j` and `-p`. It follows them exactly -- `COVERAGE_FLAGS` carries both
+spellings and the box wins -- with one difference that matters: **`-l` takes a value**, so a
+duplicate would be a real ambiguity rather than merely untidy.
+
+**Blank is a value.** It means every read, which is breseq's own default, so the column is
+nullable and `None` adds nothing to the argv rather than a "no limit" sentinel being invented.
+Zero would have been the wrong spelling of it -- a coverage limit of nothing.
+
+**A checkbox says whether there is a limit; the box says how much.** An empty box carrying
+both reads as a field somebody has not filled in yet rather than as a decision -- and since a
+`type="number"` input reports an unparseable entry as *empty*, a typo was indistinguishable
+from it. **Nothing posts the checkbox**: unticked simply sends blank, which is already how the
+server spells "every read", so the two cannot arrive disagreeing and no boolean joins
+`coverage_limit` on the model. Same rule as `locked_at` in core -- the value is the flag, with
+nothing beside it to hold a second opinion.
+
+Two things fall out of the checkbox and both are in the page. Ticking fills in `80` rather
+than enabling an empty box, because enabled-and-empty would be a third state saying nothing;
+unticking leaves the number where it is, visibly disabled and unsent, so changing your mind
+twice costs no typing. And the submit guard has to ask the checkbox **before** `checkValidity`,
+since a disabled input is barred from constraint validation and always reports itself valid.
+
+**The number is checked here because breseq will not check it.** Measured against the pinned
+build: `-l notanumber` and `-l -5` both **pass `--dry-run`**, exactly as `-j notanumber` does.
+So the preflight cannot be the guard, and `views._coverage_limit` is -- refusing before the
+upload is claimed and naming the box in `field`. `float()` alone is not enough either: it
+accepts `nan` and `inf`, which would reach the command line as words.
+
+**The stored value is a float and does not reach breseq as one.**
+`runner.format_coverage_limit` is what keeps `80` from being written `80.0` in every log, and
+it trims `%f` rather than using `%g`, which switches to exponent notation past six digits and
+would hand breseq `1e+06`.
+
+**The page checks it too, and has to.** The form is submitted through JS, so the browser's own
+constraint validation never runs -- and with the box ticked, an unparseable entry reporting
+itself empty would post as "every read", the opposite of what the tick said. `checkValidity()`
+before the upload is what stops that.
+
 ### breseq is asked whether it would accept the command line, twice
 
 `breseq --dry-run` validates every option, checks that bowtie2, samtools and gnuplot are
@@ -338,7 +411,7 @@ cd mutint && ./mutint test mutint_breseq
 
 There is no way to run them from mutint-core: the plugin is not installed there.
 
-**93 tests**, and the end-to-end ones are affordable because of two things. The test runner
+**130 tests**, and the end-to-end ones are affordable because of two things. The test runner
 forces `django.tasks` to its immediate backend, so `.enqueue()` runs inline and one POST
 exercises launch, the subprocess, the ingest and the cleanup. And `tests/fake_breseq.py` is a
 **real executable on disk** rather than a `subprocess.run` patch — the two things most likely

@@ -16,9 +16,11 @@ from mutint_breseq import pairing, runner
 
 
 class ArgvTestCase(SimpleTestCase):
-    def build(self, arguments="", reads=("r1.fastq",), processors=None):
+    def build(self, arguments="", reads=("r1.fastq",), processors=None,
+              polymorphism=False, coverage_limit=None):
         return runner.build_argv("/bin/breseq", "/out/s1", "/ref.gff3", arguments,
-                                 list(reads), processors=processors)
+                                 list(reads), processors=processors,
+                                 polymorphism=polymorphism, coverage_limit=coverage_limit)
 
     def test_the_reference_and_output_are_supplied(self):
         argv = self.build()
@@ -52,6 +54,53 @@ class ArgvTestCase(SimpleTestCase):
     def test_processors_are_injected_when_asked(self):
         argv = self.build(processors=8)
         self.assertEqual(argv[argv.index("-j") + 1], "8")
+
+    def test_the_population_checkbox_puts_p_on_the_command_line(self):
+        argv = self.build(polymorphism=True)
+        self.assertIn("-p", argv)
+        # Before the read files, which are positional and would otherwise swallow it.
+        self.assertLess(argv.index("-p"), argv.index("r1.fastq"))
+
+    def test_nothing_is_added_when_the_box_is_not_ticked(self):
+        self.assertNotIn("-p", self.build())
+
+    def test_a_typed_short_flag_is_not_repeated(self):
+        argv = self.build(arguments="-p", polymorphism=True)
+        self.assertEqual(argv.count("-p"), 1)
+
+    def test_a_typed_long_flag_suppresses_the_injection(self):
+        # The whole reason POLYMORPHISM_FLAGS carries both spellings: breseq would take either
+        # happily, and a command line saying it twice reads as the page ignoring the box.
+        argv = self.build(arguments="--polymorphism-prediction", polymorphism=True)
+        self.assertNotIn("-p", argv)
+        self.assertIn("--polymorphism-prediction", argv)
+
+    def test_a_coverage_limit_is_passed_as_l(self):
+        argv = self.build(coverage_limit=80)
+        self.assertEqual(argv[argv.index("-l") + 1], "80")
+
+    def test_a_whole_number_does_not_reach_breseq_as_a_float(self):
+        # The column is a float, and `str(80.0)` would put `80.0` on every command line and
+        # in every log.
+        self.assertEqual(runner.format_coverage_limit(80.0), "80")
+        self.assertEqual(runner.format_coverage_limit(62.5), "62.5")
+
+    def test_a_large_limit_is_not_written_in_exponent_notation(self):
+        # `%g` would hand breseq `1e+06`.
+        self.assertEqual(runner.format_coverage_limit(1000000), "1000000")
+
+    def test_no_limit_is_the_default_and_adds_nothing(self):
+        # None means every read, which is breseq's own default -- so there is nothing to say.
+        self.assertNotIn("-l", self.build())
+
+    def test_a_typed_limit_wins_in_either_spelling(self):
+        # Unlike -p this one takes a value, so a second would be a real ambiguity.
+        short = self.build(arguments="-l 40", coverage_limit=80)
+        self.assertEqual(short.count("-l"), 1)
+        self.assertEqual(short[short.index("-l") + 1], "40")
+
+        long = self.build(arguments="--limit-fold-coverage 40", coverage_limit=80)
+        self.assertNotIn("-l", long)
 
     def test_a_typed_processor_count_wins(self):
         # breseq takes the last -j silently, so injecting ours as well would make the box

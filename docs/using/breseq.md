@@ -33,9 +33,12 @@ breseq, and every run fails identically.
 
 1. Open the experiment's **Import data** page and choose the **Run breseq** tab.
 2. Type a **sample name**. This is what the sample is called everywhere in MutInt.
-3. Optionally type **breseq arguments**, and untick **Trim reads with fastp first** if you do
+3. Tick **Population sample** if these reads are a whole population rather than a clone.
+4. Optionally tick **Limit coverage to** and name a fold coverage. Left unticked, every read
+   is used; 60&ndash;80 is recommended for clonal samples.
+5. Optionally type **breseq arguments**, and untick **Trim reads with fastp first** if you do
    not want the reads trimmed.
-4. Drop the sample's read files, and press **Run breseq**.
+6. Drop the sample's read files, and press **Run breseq**.
 
 Everything you drop is one sample's reads — both mates of a pair, or several lanes. To analyze
 a second sample, launch again.
@@ -57,6 +60,47 @@ two" of one. You can correct it afterwards on the sample's edit page.
 
 Letters, digits, dot, underscore, plus and hyphen; it must start with a letter or digit.
 
+### Clone or population
+
+**Population sample** is the one question about the analysis that the page asks outright,
+because it is the one that changes what the numbers mean. A clone is one genotype; a
+population is a whole evolving culture sequenced together, so its mutations carry frequencies
+rather than being simply present.
+
+Ticking it does two things. breseq is run with `-p`, its polymorphism mode, so it predicts
+mixed mutations as well as consensus ones. And the sample that lands is **recorded as a
+population**, which is what puts a frequency column on its mutation table and what the
+Clonal / Mixed filter on Compare selects by. You can change it afterwards on the sample's edit
+page, where it is called **Mixed**.
+
+Leave it unticked for a clone, which is the default.
+
+You can also just type `-p` yourself, and that goes on working: breseq runs the same way, and
+the sample is recorded as a population as long as it is new. Two things the checkbox does that
+typing the flag does not: it also covers **re-running over a sample that already exists** --
+correcting a clone's analysis to a population's -- and it works with either spelling of the
+flag. If you tick the box and type the flag as well, what you typed is left exactly as it is
+and nothing is repeated.
+
+### Limiting coverage
+
+A deep run wastes time: past a point, more reads make the analysis slower without finding
+anything more. **Limit coverage to** tells breseq to use only enough reads to reach the fold
+coverage you name, and to ignore the rest.
+
+**The tick box is what decides whether coverage is limited at all.** Left unticked — which is
+how the page starts — every read is used, which is breseq's own default and is always safe.
+Ticking it enables the number beside it and fills in 80, which you can change.
+
+**60&ndash;80 is the recommendation for clonal samples**, and it is usually a large speed-up
+with no loss of sensitivity. The actual coverage achieved comes out somewhat lower, because
+not every read maps. For a population sample, where a mutation at 5% has to be told from
+noise, think before you cut anything: depth is what that distinction is made of.
+
+The box takes a number and nothing else. It is passed as `-l`; typing `-l` or
+`--limit-fold-coverage` into the arguments box yourself does the same job, and what you typed
+wins over the box.
+
 ### The arguments box
 
 Passed to breseq as you type it. `-o` and `-r` are supplied for you — the output directory and
@@ -65,10 +109,7 @@ name one yourself.
 
 Common ones:
 
-- `-p` — call polymorphisms as well as consensus mutations, for a population sample rather
-  than a clone.
 - `-j 4` — use four processors rather than all of them, to leave the machine usable.
-- `-l 80` — trim coverage to 80-fold before calling.
 
 breseq's own documentation lists the rest. Nothing is passed through a shell, so quoting works
 the way it does in a terminal and nothing else in the box can have any other effect.

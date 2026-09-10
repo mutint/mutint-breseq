@@ -39,6 +39,17 @@ FASTP_MAX_THREADS = 16
 # box does nothing.
 PROCESSOR_FLAGS = ("-j", "--num-processors")
 
+# breseq's own spelling of "this sample is not clonal", both forms, matched for the same reason
+# `-j` is: the Population sample checkbox injects `-p` only when the box does not already say
+# so. A second `-p` would not trouble breseq -- it is a boolean flag -- but a command line
+# showing it twice reads as the page having ignored what was typed.
+POLYMORPHISM_FLAGS = ("-p", "--polymorphism-prediction")
+
+# breseq's "analyze only enough reads for this fold coverage", both spellings, matched for the
+# same reason as the two above. Unlike `-p` this one takes a value, so a duplicate would be a
+# genuine ambiguity rather than merely untidy.
+COVERAGE_FLAGS = ("-l", "--limit-fold-coverage")
+
 # breseq validates the options and every path, then exits without running and without creating
 # anything -- 0 if it is happy, nonzero if not. Added in breseq-prerelease g23736ada, which
 # `tools.txt` pins for this reason.
@@ -78,13 +89,34 @@ def split_arguments(text):
     return shlex.split(text or "")
 
 
+def format_coverage_limit(value):
+    """breseq's `-l` value as text: `80` rather than `80.0`.
+
+    The column is a float because breseq accepts one, and almost every value anybody types is
+    a whole number -- so a bare `str()` would put `80.0` on every command line and in every
+    log. Formatted through `%f` and trimmed rather than through `%g`, which switches to
+    exponent notation past six digits and would hand breseq `1e+06`.
+    """
+    text = ("%f" % float(value)).rstrip("0").rstrip(".")
+    return text or "0"
+
+
 def build_argv(breseq, output_dir, reference, arguments, reads, processors=None,
-               dry_run=False):
+               dry_run=False, polymorphism=False, coverage_limit=None):
     """The command line for one run.
 
     Order matters only in that `-o` and `-r` must precede the read files, which are
     positional. The typed arguments go between, so anything they set overrides the defaults
     ahead of them and nothing they set can be mistaken for a read file.
+
+    `polymorphism` is the Population sample checkbox, and adds `-p` unless the box already
+    names it in either spelling. `coverage_limit` is the Limit coverage box and adds `-l`
+    under the same rule; **None means every read**, which is breseq's own default and is why
+    nothing is added for it rather than a value meaning "no limit" being invented.
+
+    Both follow `processors`: injected only where the arguments box does not already say, and
+    placed with the other injected defaults rather than after the typed arguments, so the box
+    remains the last word on everything.
 
     `dry_run` adds `--dry-run`, and **the preflight is otherwise this same command line** --
     one builder, deliberately, because a preflight assembled separately would validate
@@ -103,6 +135,10 @@ def build_argv(breseq, output_dir, reference, arguments, reads, processors=None,
     # that cannot be overridden is worse than no default, so the box wins.
     if processors and not any(flag in typed for flag in PROCESSOR_FLAGS):
         argv += ["-j", str(processors)]
+    if polymorphism and not any(flag in typed for flag in POLYMORPHISM_FLAGS):
+        argv.append("-p")
+    if coverage_limit is not None and not any(flag in typed for flag in COVERAGE_FLAGS):
+        argv += ["-l", format_coverage_limit(coverage_limit)]
     argv += ["-o", output_dir, "-r", reference]
     argv += typed
     argv += list(reads)
