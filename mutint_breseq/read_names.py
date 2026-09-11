@@ -49,6 +49,15 @@ _READ_NUMBER = re.compile(r"^(?:R|read)[12]$", re.IGNORECASE)
 #: dropped as well -- on its own, a trailing `001` is as likely to be an isolate.
 _CHUNK = re.compile(r"^\d{3}$")
 
+#: Separators that must not be left dangling at either end of a derived name.
+#:
+#: Taking a decoration out of the middle of a name leaves the separator that introduced it:
+#: `SRR37077254.R1` and `SRR37077254.R2` are mates, removing the read number leaves
+#: `SRR37077254.`, and that trailing period would become the sample's name and its directory's.
+#: Nothing downstream refuses it -- `SAMPLE_NAME_RE` anchors the *first* character only -- so it
+#: reached the database, which is how it was found.
+_EDGE_SEPARATORS = "._-"
+
 
 def strip_extension(name):
     """`name` without one trailing FASTQ suffix, whichever of the four it wears."""
@@ -80,6 +89,10 @@ def _difference_removed(first, second):
     return first
 
 
+def _is_decoration(token):
+    return bool(_LANE.match(token) or _READ_NUMBER.match(token) or _CHUNK.match(token))
+
+
 def strip_decorations(name):
     """One file's name with the extension, lane, read number and chunk index removed.
 
@@ -92,26 +105,40 @@ def strip_decorations(name):
     and the derived name comes out as `S12_L00`.
 
     So the lane goes first, by name, and mates are found afterwards -- see `derive_samples`.
+
+    **Any of `.`, `-` and `_` separates a token**, and the separator goes with whatever it
+    introduced. Underscores alone were not enough: single-end reads are real and
+    `SRR37077254.R1.fastq.gz` arrives with no mate to compare against, so the `.R1` has to be
+    recognised by name or not at all.
+
+    **Only a trailing run of decorations is removed**, which is what keeps that widening safe.
+    A read number sits at the end of a filename -- or beside the chunk index, which is also at
+    the end -- and a rule that removed one from anywhere would eat the *population* out of
+    `R1_500gen_x`. The scan stops at the first token that is not a decoration, and at least one
+    token always survives.
     """
     base = strip_extension(name.rsplit("/", 1)[-1])
-    fields = [field for field in base.split("_") if field]
-    if len(fields) < 2:
-        # A single field is all the name there is; it cannot also be a decoration.
-        return base
 
-    found_decoration = False
-    kept = []
-    for field in fields:
-        if _LANE.match(field) or _READ_NUMBER.match(field):
-            found_decoration = True
-            continue
-        kept.append(field)
+    # Separators are kept so the survivors rejoin exactly as they arrived: splitting on
+    # `[._-]` and rejoining with one of them would rewrite `Ara-2_500gen_763A`.
+    pieces = re.split(r"([._-])", base)
+    tokens, separators = pieces[0::2], pieces[1::2]
 
-    # The chunk index is only a chunk index in the company of one of the others.
-    if found_decoration and len(kept) > 1 and _CHUNK.match(kept[-1]):
-        kept.pop()
+    end = len(tokens)
+    while end > 1 and _is_decoration(tokens[end - 1]):
+        end -= 1
 
-    return "_".join(kept) or base
+    # A chunk index is only a chunk index in the company of a lane or a read number. On its
+    # own a trailing `001` is as likely to be an isolate, so the whole tail goes back.
+    tail = tokens[end:]
+    if tail and not any(_LANE.match(token) or _READ_NUMBER.match(token) for token in tail):
+        end = len(tokens)
+
+    kept = tokens[:end]
+    rejoined = kept[0] if kept else ""
+    for index in range(1, len(kept)):
+        rejoined += separators[index - 1] + kept[index]
+    return rejoined or base
 
 
 def derive_samples(names, paired=True):
@@ -148,5 +175,9 @@ def derive_samples(names, paired=True):
         files = []
         for stripped in read_set.files:
             files.extend(files_by_stripped[stripped])
-        derived.append(DerivedSample(name.strip("_") or read_set.files[0], files))
+        # Both ends, and every separator: a name is the one the sample wears everywhere in
+        # MutInt and the one its directory takes, so it should not end in the punctuation that
+        # used to introduce something this stripped out.
+        derived.append(
+            DerivedSample(name.strip(_EDGE_SEPARATORS) or read_set.files[0], files))
     return derived

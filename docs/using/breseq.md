@@ -75,9 +75,20 @@ No name boxes at all: **each read file, or each pair of mates, is one sample**, 
 file. Drop twenty files and launch ten samples in one go — each becomes a run of its own, with
 its own entry on the Jobs page and its own Cancel.
 
-What is removed from a filename to leave the sample's name is the extension, the read number
-(`_R1`, `_R2`, or a bare `_1`/`_2` when the mate is in the drop too), the lane (`_L001`) and
-bcl2fastq's trailing chunk index (`_001`). Everything else is the name.
+What is removed from a filename to leave the sample's name is the extension, the read number,
+the lane (`_L001`) and bcl2fastq's trailing chunk index (`_001`). Everything else is the name,
+and it never ends in the `.`, `-` or `_` that introduced whatever was taken out.
+
+**A period, a hyphen or an underscore separates them all the same**, so `SRR37077254.R1`,
+`SRR37077254_R1` and `SRR37077254-R1` are each the sample `SRR37077254` — with or without a
+mate in the drop, which matters because single-end reads are common and there is then nothing
+to compare against.
+
+**Only decorations at the end of the name are removed.** The scan stops at the first thing that
+is not one, so a population genuinely called `R1` survives: `R1_500gen_x` is read as population
+R1, time point 500, sample x. When both mates *are* present, the read number is also found by
+comparing the two names, which is what catches a bare `lane_1.fq`/`lane_2.fq` with no `R` to
+announce itself.
 
 | dropped | sample | placed as |
 |---|---|---|
@@ -85,6 +96,7 @@ bcl2fastq's trailing chunk index (`_001`). Everything else is the name.
 | `pop3_day7_clone2_R1.fq.gz`, `..._R2...` | `pop3_day7_clone2` | pop3, time point 7, sample clone2 |
 | `3-30000-1-1_R1.fastq.gz`, `..._R2...` | `3-30000-1-1` | 3, time point 30000, sample 1-1 |
 | `lane_1.fq`, `lane_2.fq` | `lane` | Unspecified, no time point |
+| `SRR37077254.R1.fastq.gz`, `...R2...` | `SRR37077254` | Unspecified, no time point |
 | `S12_L001_R1_001.fastq.gz` and three more | `S12` | Unspecified, no time point |
 
 That last row is worth reading twice. Illumina's own filenames carry a sample-sheet index and

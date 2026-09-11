@@ -26,6 +26,10 @@ CASES = [
     (["lane_1.fq", "lane_2.fq"], "lane", None),
     # One file, no mate: nothing is stripped but the extension.
     (["Ara-2_500gen_763A.fastq.gz"], "Ara-2_500gen_763A", ("Ara-2", 500, "763A")),
+    # Mates separated by a period rather than an underscore -- an SRA accession, as downloaded.
+    (["SRR37077254.R1.fastq.gz", "SRR37077254.R2.fastq.gz"], "SRR37077254", None),
+    # The same thing single-ended, which is the case with no mate to compare against.
+    (["SRR37077254.R1.fastq.gz"], "SRR37077254", None),
 ]
 
 
@@ -89,6 +93,48 @@ class DerivationTestCase(SimpleTestCase):
         # On its own, `001` is as likely to be an isolate as a bcl2fastq chunk.
         derived = read_names.derive_samples(["Ara-2_500gen_001.fastq.gz"])
         self.assertEqual(derived[0].name, "Ara-2_500gen_001")
+
+    def test_a_name_never_ends_in_the_separator_its_decoration_hung_off(self):
+        """`SRR37077254.R1` and `.R2` are mates; taking the read number out leaves the period.
+
+        Found in real use, and nothing downstream would have caught it: `SAMPLE_NAME_RE`
+        anchors the first character only, so `SRR37077254.` was a perfectly acceptable sample
+        name and a perfectly acceptable directory name.
+        """
+        for files, expected in (
+                (["SRR37077254.R1.fastq.gz", "SRR37077254.R2.fastq.gz"], "SRR37077254"),
+                (["s-R1.fastq", "s-R2.fastq"], "s"),
+                (["s_R1.fastq", "s_R2.fastq"], "s")):
+            with self.subTest(files=files):
+                self.assertEqual(read_names.derive_samples(files)[0].name, expected)
+
+    def test_a_read_number_is_recognised_whatever_separates_it(self):
+        """Single-ended, so there is no mate to find the read number by comparison.
+
+        Underscores alone were not enough: SRA downloads arrive as `SRR….R1.fastq.gz`, and with
+        no `.R2` beside them the `.R1` has to be recognised by name or not at all.
+        """
+        for name in ("SRR37077254.R1.fastq.gz", "SRR37077254_R1.fastq.gz",
+                     "SRR37077254-R1.fastq.gz", "SRR37077254.read2.fq"):
+            with self.subTest(name=name):
+                self.assertEqual(read_names.derive_samples([name])[0].name, "SRR37077254")
+
+    def test_only_a_trailing_run_of_decorations_is_removed(self):
+        """What keeps `.` and `-` safe to split on.
+
+        A read number sits at the end of a filename, so the scan stops at the first token that
+        is not a decoration. Removing one from anywhere would eat the *population* out of
+        `R1_500gen_x`, which is a perfectly good coordinate whose population is called R1.
+        """
+        self.assertEqual(
+            read_names.derive_samples(["R1_500gen_x.fastq.gz"])[0].name, "R1_500gen_x")
+
+    def test_splitting_on_hyphens_does_not_rewrite_a_name(self):
+        """Separators are kept and the survivors rejoin exactly as they arrived -- splitting on
+        `[._-]` and rejoining with one of them would turn `Ara-2_500gen_763A` into mush."""
+        derived = read_names.derive_samples(
+            ["Ara-2_500gen_763A_R1.fastq.gz", "Ara-2_500gen_763A_R2.fastq.gz"])
+        self.assertEqual(derived[0].name, "Ara-2_500gen_763A")
 
     def test_a_name_that_is_nothing_but_decoration_keeps_something(self):
         # Better a sample called `R1` than one called "".

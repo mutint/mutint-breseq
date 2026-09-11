@@ -225,6 +225,28 @@ is a sample whose isolate is called 2, and a rule that ate it would file the sam
 point with no isolate. Likewise a trailing `001` is only a chunk index in the company of a lane
 or a read number.
 
+**A derived name never ends in a separator**, and it did. Taking a decoration out of the middle
+leaves the punctuation that introduced it: `SRR37077254.R1` and `.R2` are mates, removing the
+read number leaves `SRR37077254.`, and that became the sample's name and its directory's.
+Nothing downstream would have caught it -- `SAMPLE_NAME_RE` anchors the *first* character only,
+so a trailing period is a perfectly acceptable name. It was found in use, on real SRA
+downloads, which is the general lesson: the derivation is only as good as the filename shapes
+it has actually met.
+
+**Any of `.`, `-` and `_` separates a token.** Underscores alone were not enough: single-end
+reads are ordinary, SRA downloads arrive as `SRR….R1.fastq.gz`, and with no mate beside them
+the `.R1` has to be recognised by name or not at all.
+
+Two things make that widening safe, and both are the reason it is not simply a bigger character
+class:
+
+- **Only a trailing run of decorations is removed.** A read number sits at the end of a
+  filename, or beside the chunk index which is also at the end, so the scan works right to left
+  and stops at the first token that is not a decoration. A rule that removed one from anywhere
+  would eat the *population* out of `R1_500gen_x`. At least one token always survives.
+- **The separators are kept and the survivors rejoin as they arrived.** Splitting on `[._-]`
+  and rejoining with one of them would rewrite `Ara-2_500gen_763A`.
+
 **A collision warns and does not block.** Importing a sample the experiment already holds
 *supersedes* it -- `_database_gd_mutations` clears its calls before writing the new ones -- and
 that is a thing people do on purpose after fixing a command line. So the page names the sample
@@ -518,7 +540,7 @@ cd mutint && ./mutint test mutint_breseq
 
 There is no way to run them from mutint-core: the plugin is not installed there.
 
-**149 tests**, and the end-to-end ones are affordable because of two things. The test runner
+**153 tests**, and the end-to-end ones are affordable because of two things. The test runner
 forces `django.tasks` to its immediate backend, so `.enqueue()` runs inline and one POST
 exercises launch, the subprocess, the ingest and the cleanup. And `tests/fake_breseq.py` is a
 **real executable on disk** rather than a `subprocess.run` patch — the two things most likely
