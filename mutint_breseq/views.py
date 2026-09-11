@@ -254,6 +254,9 @@ def _run_rows(experiment):
             "started_at": run.started_at.isoformat() if run.started_at else None,
             "finished_at": run.finished_at.isoformat() if run.finished_at else None,
             "error": run.error,
+            # Things worth reading about a run that *worked*, so they are carried separately
+            # from `error` and shown whatever the status is.
+            "notes": run.notes or [],
             "log": run.log,
             "sample_id": run.sample_id,
             # Core's viewer for the sample this run produced, not a route of our own. The

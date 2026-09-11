@@ -92,6 +92,14 @@ class BreseqRun(models.Model):
     # deleted. Not paths: nothing resolves these, they are for a person to read.
     read_files = models.JSONField(default=list)
 
+    # Things a person should read about a run that **worked**. `error` is the failure message
+    # and the run list only folds the log open for a failure, so neither is a home for "this
+    # succeeded, and not quite as asked": a pair split because its mates disagreed still
+    # produces a sample, and replacing a silent truncation with a silent unpairing would be no
+    # better than the bug. A list because one run is one sample and a sample may hold several
+    # read sets, so there may be several things to say.
+    notes = models.JSONField(default=list)
+
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_QUEUED)
     # django.tasks' own result id, for `run_breseq.get_result(...)`. Blank when the enqueue
     # itself failed, which is a state the page has to render rather than assume away.

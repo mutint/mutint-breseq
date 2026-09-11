@@ -34,15 +34,16 @@ a project's `.gitmodules` is how a component is not installed.
 | `runner.py` | pure: both argvs (fastp's and breseq's), the PATH, what counts as usable output, what to keep. It runs nothing -- `mutint_jobs.processes.run_tool` does |
 | `pairing.py` | pure: breseq's rule for which read files are mates, and which files fastp must not touch |
 | `read_names.py` | pure: what a read file's name says the sample is called, and which files are one sample |
+| `mate_check.py` | pure: whether two files that pair by name really are mates, and how to unpair them if not |
 | `tasks.py` | the `@task` — trim, run breseq, check, import, clean up |
 | `views.py` | the page, the launch endpoint, the preview, the run list |
 | `models.py` | `BreseqRun`, and the receiver that owns its directory |
 | `static/mutint_breseq/launch.js` | the page's behaviour: the input-type menu, the boxes, the drop zone, the run list |
 
-The first three are pure on purpose, in the shape `mutint_sample/locus.py` is: the rules most
+The first four are pure on purpose, in the shape `mutint_sample/locus.py` is: the rules most
 likely to be changed by accident are what reaches breseq's argv, what has to be on disk before
-the importer is called, and how twenty files become ten samples -- all testable without breseq,
-a worker or a request.
+the importer is called, how twenty files become ten samples, and whether two of them are really
+mates -- all testable without breseq, a worker or a request.
 
 **The page's script is a file, not an inline `<script>`**, and moved when the input-type menu
 made it four hundred lines inside a template that also holds the markup. It lives under
@@ -338,6 +339,73 @@ constraint validation never runs -- and with the box ticked, an unparseable entr
 itself empty would post as "every read", the opposite of what the tick said. `checkValidity()`
 before the upload is what stops that.
 
+### Two files that pair by name are not necessarily mates
+
+`pairing.read_file_sets` is breseq's own rule and decides mates from the **names** alone, which
+is all breseq itself knows. Nothing checked the contents, and the failure that hides behind that
+is the worst kind this plugin has:
+
+**Handed an unequal pair, both tools truncate to the shorter and exit 0.** Measured against the
+pinned versions:
+
+| | given | wrote | exit | said |
+|---|---|---|---|---|
+| fastp 1.3.6 | 5 and 3 | 3 and 3 | 0 | `WARNING: different read numbers of the 0 pack` |
+| breseq 0.50 | 400 and 250 | `num_reads=250` for **both** | 0 | `Warning: R2 file ended before R1 …` |
+
+So the run succeeds, the sample imports, the mutation table looks ordinary, and the reads are
+gone. Each tool warns, into hundreds of lines nobody reads, with a zero exit code -- the same
+shape as the missing-bowtie2 trap above, and the same answer: *what the run produced decides,
+not what it exited with.*
+
+**Because both tools do it, the check belongs to the data**, and runs whether or not trimming
+is on. `mate_check.mismatch_reason` asks, in order, whether either file can be read, whether
+either has a line count not divisible by four, whether the counts differ, and whether the two
+start with the same read -- that last because equal counts are not proof, two different samples'
+R1 being able to pair by name and match in size. Counting is a block-at-a-time newline count,
+measured at 2 000 000 records in 0.21s against a breseq run of hours.
+
+**What it does about it is rename one file**, and that is the load-bearing part. fastp is *told*
+which files are mates by `build_fastp_argv`; breseq works it out for itself from the names. So
+unpairing for fastp alone would leave breseq pairing them anyway and truncating exactly as
+before, and `--no-paired-mapping` would be far too blunt -- it is per *run*, so a sample
+assembled from several lanes would lose the pairing on its good pairs too. Inserting `.unpaired`
+before the suffix makes the name a different *length*, which is what breseq's rule keys on, so
+both tools apply the one rule they already share and cannot reach different answers. Verified
+end to end against the real breseq: `READ FILE SET::UNPAIRED` twice, no warning, `num_reads=400`
+and `250` -- every read analysed.
+
+Exactly **one** mate is renamed; renaming both would leave two names differing at one `1`/`2`
+again and pair them straight back together.
+
+**The run then succeeds, so `error` is the wrong place to say so** and the run list only folds
+the log open for a failure. `BreseqRun.notes` is a list of sentences about a run that worked,
+rendered amber in the run list's detail row. Replacing a silent truncation with a silent
+unpairing would have been no better than the bug.
+
+**What it does not catch**: truncation *inside* a line. A file cut mid-quality-line still has
+four lines in that record. The counts of the two mates then disagree, which is the check that
+fires -- but a single-end file cut that way passes unremarked.
+
+### The sample records what it was made from, and this is the only place the pairing is known
+
+Core keeps `Sample.inputs` -- what produced a sample -- and its own folder importer fills it
+from breseq's `#=READSEQ` lines. `tasks._record_read_sources` **replaces** that after the
+import, and the reason is worth stating: for a folder this plugin built, `READSEQ` names the
+*trimmed copies* under a directory about to be deleted. The reads the run was handed are what a
+person uploaded and what they would recognise.
+
+**It is also the only place that knows which files were mates.** `pairing.read_file_sets` is
+breseq's rule and lives here, so core records read files ungrouped; a run launched through this
+page records the grouping the tools actually used.
+
+**The names are the uploaded ones and the grouping is the real one**, which is why it takes the
+final read list rather than `run.read_files`. They differ in exactly one case and it is the case
+worth getting right: a pair `_split_mismatched_pairs` took apart was renamed on disk, so
+grouping the *uploaded* names would re-pair them and record a pairing that did not happen.
+`mate_check.uploaded_name` takes the marker back out, so the file shown is the one dropped and
+the grouping says it stood alone.
+
 ### breseq is asked whether it would accept the command line, twice
 
 `breseq --dry-run` validates every option, checks that bowtie2, samtools and gnuplot are
@@ -540,7 +608,7 @@ cd mutint && ./mutint test mutint_breseq
 
 There is no way to run them from mutint-core: the plugin is not installed there.
 
-**153 tests**, and the end-to-end ones are affordable because of two things. The test runner
+**177 tests**, and the end-to-end ones are affordable because of two things. The test runner
 forces `django.tasks` to its immediate backend, so `.enqueue()` runs inline and one POST
 exercises launch, the subprocess, the ingest and the cleanup. And `tests/fake_breseq.py` is a
 **real executable on disk** rather than a `subprocess.run` patch — the two things most likely

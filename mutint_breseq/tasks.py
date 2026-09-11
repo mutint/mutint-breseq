@@ -32,8 +32,9 @@ from mutint_common.tools import ToolMissing
 from mutint_import import breseq_folder, import_lock
 from mutint_import.import_lock import ImportInProgress
 from mutint_jobs import jobs, logs, processes
+from mutint_sample import inputs
 
-from mutint_breseq import runner
+from mutint_breseq import mate_check, pairing, runner
 from mutint_breseq.models import (
     STATUS_CANCELLED,
     STATUS_FAILED,
@@ -113,6 +114,78 @@ def _tail(queue_id, run):
     """
     text, _truncated = logs.read_tail(queue_id)
     return run.truncated_log(text)
+
+
+def _note(run, sentence, log):
+    """Record something a person should read about a run that is going to succeed anyway."""
+    run.notes = list(run.notes or []) + [sentence]
+    run.save(update_fields=["notes"])
+    logs.write(log, sentence)
+    logger.info("breseq run %s: %s", run.pk, sentence)
+
+
+def _split_mismatched_pairs(run, reads, paired, log, queue_id):
+    """Unpair any two files that pair by name but are not mates. Returns the new read list.
+
+    **Both tools truncate an unequal pair to the shorter and exit 0** -- measured; see
+    `mate_check`. So a run that looks perfect can be missing half its reads, and the only
+    warning is a line in the middle of a log nobody reads.
+
+    What is done about it is to **rename one of the two files**, and that is the load-bearing
+    part. fastp is told which files are mates by `build_fastp_argv`; breseq works it out for
+    itself from the names. Unpairing for fastp alone would leave breseq pairing them anyway and
+    truncating exactly as before, and `--no-paired-mapping` would fix that far too bluntly --
+    it is per *run*, so a sample assembled from several lanes would lose the pairing on its good
+    pairs too. Renaming the file on disk means both tools apply the one rule they already share
+    and cannot reach different answers.
+
+    Nothing is discarded: the pair becomes two single-end files and every read is analysed. A
+    truncated download is still worth what is in it, which is why this does not refuse the run.
+    """
+    renamed = {}
+    for read_set in pairing.read_file_sets(reads, paired=paired):
+        if len(read_set.files) != 2:
+            continue
+        if not all(pairing.is_fastq(path) for path in read_set.files):
+            # An aligned SAM under `--aligned-sam` is not a thing to count FASTQ records in.
+            continue
+
+        # Counting is a pass over the reads, so a person who changed their mind should not have
+        # to wait it out. Every other slow step here polls too.
+        jobs.check_cancelled(queue_id, "This run was cancelled while its read files were "
+                                       "being checked.")
+
+        first, second = read_set.files
+        reason = mate_check.mismatch_reason(first, second)
+        if reason is None:
+            continue
+
+        target = mate_check.unpaired_name(second)
+        os.rename(second, target)
+        renamed[second] = target
+        _note(run,
+              "%s and %s pair by name but %s, so they were analysed as two single-end files "
+              "rather than as a pair -- %s was renamed to %s. Both breseq and fastp would "
+              "otherwise have used only as many reads as the shorter file holds and said so "
+              "nowhere. A truncated or interrupted download is the usual cause."
+              % (os.path.basename(first), os.path.basename(second), reason,
+                 os.path.basename(second), os.path.basename(target)),
+              log)
+
+    if not renamed:
+        return reads
+
+    reads = [renamed.get(path, path) for path in reads]
+
+    # Asserted rather than assumed: the contract is that these files no longer pair, and the
+    # rule that decides it is breseq's, not ours. Renaming *both* mates, for instance, would
+    # leave two names differing at one `1`/`2` again and pair them straight back together.
+    for read_set in pairing.read_file_sets(reads, paired=paired):
+        if len(read_set.files) == 2 and any(path in renamed.values()
+                                            for path in read_set.files):
+            logger.warning("breseq run %s: %s still pairs after renaming",
+                           run.pk, read_set.name)
+    return reads
 
 
 class _FastpFailed(Exception):
@@ -289,15 +362,26 @@ def run_breseq(context, run_id):
                   log=output)
             raise RuntimeError("breseq refused the command line for run %s" % run.pk)
 
+        # **Before trimming, and outside the `if` below**: both tools truncate an unequal pair
+        # and neither fails, so this is about the data rather than about fastp. The dry run
+        # comes first because it is seconds and catches a bad command line before anything
+        # reads gigabytes.
+        paired = "--no-paired-mapping" not in runner.split_arguments(run.arguments)
+        try:
+            reads = _split_mismatched_pairs(run, reads, paired, log, queue_id)
+        except jobs.JobCancelled:
+            _cancelled(run, log=_tail(queue_id, run))
+            return None
+
         if run.trim_reads:
             try:
                 fastp = runner.fastp_path()
             except ToolMissing as missing:
                 _fail(run, str(missing))
                 raise
+            # `paired` is computed above, before the mate check, because both need it:
             # `--no-paired-mapping` makes breseq treat every file as its own set, so fastp
-            # must too.
-            paired = "--no-paired-mapping" not in runner.split_arguments(run.arguments)
+            # must too, and so must anything deciding whether two files claim to be mates.
             try:
                 reads = _trim_reads(run, fastp, reads, paired, deadline, log, queue_id)
             except processes.Cancelled:
@@ -395,6 +479,7 @@ def run_breseq(context, run_id):
     sample = _imported_sample(experiment, run.sample_name)
     if run.population_sample:
         _mark_population_sample(sample)
+    _record_read_sources(sample, reads, paired)
     # Everything worth keeping -- data/'s four files and breseq's HTML report -- is already in
     # the store under the sample, put there by the importer above.
     runner.cleanup_after_import(run.directory(), run.output_dir())
@@ -435,6 +520,40 @@ def _mark_population_sample(sample):
         return
     sample.is_clonal = False
     sample.save(update_fields=["is_clonal"])
+
+
+def _record_read_sources(sample, reads, paired):
+    """Tell core what this sample was made from: the reads, and which of them were mates.
+
+    **Replacing what the importer just wrote**, which for a folder this plugin built is the
+    folder's own name or the `#=READSEQ` lines breseq put in the `.gd`. The reads this run was
+    handed are the truer answer -- they are what a person uploaded, under the names they
+    uploaded them with, rather than an artifact of this plugin's own plumbing.
+
+    **And the only place the pairing is known.** `pairing.read_file_sets` is breseq's rule and
+    lives here, so core's own folder import records read files ungrouped; a run launched
+    through this page records the grouping the tools actually used, including a pair that
+    `_split_mismatched_pairs` took apart because its mates disagreed. What is recorded is what
+    happened, not what was asked for.
+
+    **The names are the uploaded ones and the grouping is the real one**, which is why this
+    takes the final read list rather than `run.read_files`. Those two differ in exactly one
+    case and it is the case worth getting right: a pair `_split_mismatched_pairs` took apart
+    was renamed on disk, so grouping the *uploaded* names would re-pair them by name and record
+    a pairing that did not happen. `mate_check.uploaded_name` takes the marker back out, so a
+    person is shown the file they dropped and the grouping says it stood alone.
+    """
+    if sample is None or not reads:
+        return
+
+    entries = []
+    for group, read_set in enumerate(
+            pairing.read_file_sets(list(reads), paired=paired), start=1):
+        for position, path in enumerate(read_set.files, start=1):
+            entries.append(inputs.Input(
+                inputs.KIND_READS, mate_check.uploaded_name(path), group,
+                position if len(read_set.files) == 2 else None))
+    inputs.record_inputs(sample, entries)
 
 
 def _imported_sample(experiment, sample_name):

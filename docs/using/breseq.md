@@ -193,6 +193,26 @@ Common ones:
 breseq's own documentation lists the rest. Nothing is passed through a shell, so quoting works
 the way it does in a terminal and nothing else in the box can have any other effect.
 
+### When two files are not really a pair
+
+Files are paired by their names — two names of the same length differing in one place, where
+one has a `1` and the other a `2`. That is breseq's own rule, and names are all it has to go on.
+
+Before anything is trimmed, each apparent pair is checked: the two files must hold the **same
+number of reads**, and must start with the **same read**. If they do not, they are analysed as
+**two single-end files** instead of as a pair, and the run says so in its row of the run list.
+
+Nothing is discarded, and that is the point. Handed two files that pair by name but hold
+different numbers of reads, **both breseq and fastp quietly use only as many reads as the
+shorter file holds and exit successfully** — so without this check a run reports success, the
+sample imports, the mutation table looks perfectly ordinary, and a chunk of the data is simply
+missing. Each tool does print a warning, in the middle of several hundred lines nobody reads.
+
+The usual cause is a download that was interrupted or a file that was copied while it was still
+being written. The reads are worth analysing as far as they go, which is why the run continues —
+but if you were expecting a paired analysis, this is the note that tells you why you did not get
+one, and re-downloading the files and running again is the fix.
+
 ### Trimming
 
 By default the reads are run through [fastp](https://github.com/OpenGene/fastp) before breseq

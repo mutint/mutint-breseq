@@ -30,7 +30,7 @@ from mutint_breseq.models import (
     STATUS_QUEUED,
     BreseqRun,
 )
-from mutint_breseq.tests import fake_breseq, fake_fastp
+from mutint_breseq.tests import fake_breseq, fake_fastp, fastq_fixture
 from mutint_breseq.tests.test_launch import establish_reference
 
 
@@ -71,7 +71,15 @@ class RunTestCase(TestCase):
 
     # --- helpers ------------------------------------------------------------------------
 
-    def _stage(self, names=("s1_R1.fastq", "s1_R2.fastq"), content="ACGT"):
+    def _stage(self, names=("s1_R1.fastq", "s1_R2.fastq"), content=None):
+        """Stage a drop. Writes **real FASTQ records** unless `content` says otherwise.
+
+        It used to write the four bytes `ACGT` to every file, which is not a FASTQ at all --
+        no header, no `+`, no quality line -- and nothing noticed, because nothing read them.
+        `mate_check` reads them now and is quite right to call one line truncated. Every
+        end-to-end test here has therefore been exercising the trim branch by accident rather
+        than by being given something valid.
+        """
         session = staging.open_session(
             self.owner, self.experiment, "mutint_breseq",
             [{"path": name, "size": 4} for name in names])
@@ -79,12 +87,16 @@ class RunTestCase(TestCase):
         for name in names:
             path = os.path.join(root, name)
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w") as handle:
-                handle.write(content)
+            if content is None:
+                # The same records in each file, so a pair of them really is a pair.
+                fastq_fixture.write(path, count=4)
+            else:
+                with open(path, "w") as handle:
+                    handle.write(content)
         return session
 
     def _launch(self, sample="s1", population="", time_point="", arguments="",
-                names=("s1_R1.fastq", "s1_R2.fastq"), trim_reads=None, content="ACGT",
+                names=("s1_R1.fastq", "s1_R2.fastq"), trim_reads=None, content=None,
                 population_sample=None, coverage_limit=None, input_mode=None,
                 sample_name=None):
         """The endpoint takes the three parts of a coordinate, not a joined name: the server
@@ -520,6 +532,116 @@ class RunTestCase(TestCase):
         self._launch(population_sample=True)
         rows = self.client.get("/breseq/runs?experiment_id=%s" % self.experiment.id).json()
         self.assertTrue(rows["runs"][0]["population_sample"])
+
+    # --- what the sample was made from --------------------------------------------------------
+
+    def test_the_sample_records_the_reads_it_was_made_from(self):
+        """Core's own folder import would record what breseq's `#=READSEQ` says -- for a folder
+        this plugin built, that is the trimmed copies under a directory about to be deleted.
+        The reads the run was handed are the truer answer, so this replaces it."""
+        self._launch(names=("s1_R1.fastq", "s1_R2.fastq"))
+        sample = BreseqRun.objects.get().sample
+
+        self.assertEqual(["s1_R1.fastq", "s1_R2.fastq"],
+                         [entry["value"] for entry in sample.inputs])
+        self.assertEqual({"reads"}, {entry["kind"] for entry in sample.inputs})
+
+    def test_it_records_which_reads_were_mates(self):
+        """The only place the pairing is known: `read_file_sets` is breseq's rule and lives
+        here, so core's folder import records read files ungrouped."""
+        self._launch(names=("s1_R1.fastq", "s1_R2.fastq"))
+        sample = BreseqRun.objects.get().sample
+
+        self.assertEqual([1, 1], [entry["group"] for entry in sample.inputs])
+        self.assertEqual([1, 2], [entry["mate"] for entry in sample.inputs])
+
+    def test_a_pair_split_for_disagreeing_is_recorded_as_two_singles(self):
+        """What is recorded is what happened, not what was asked for."""
+        self._launch_records((12, 7))
+        sample = BreseqRun.objects.get().sample
+
+        self.assertEqual([None, None], [entry["mate"] for entry in sample.inputs])
+        self.assertEqual(2, len({entry["group"] for entry in sample.inputs}))
+
+    # --- mates that are not mates -----------------------------------------------------------
+
+    def _stage_records(self, counts, names=("s1_R1.fastq", "s1_R2.fastq")):
+        """Stage a pair of real FASTQ files holding `counts` records each."""
+        session = staging.open_session(
+            self.owner, self.experiment, "mutint_breseq",
+            [{"path": name, "size": 4} for name in names])
+        root = store.ensure_dir(store.staging_dir(session.id))
+        for index, (name, count) in enumerate(zip(names, counts)):
+            fastq_fixture.write(os.path.join(root, name), count=count, mate=index + 1)
+        return session
+
+    def _launch_records(self, counts, trim_reads=None, names=("s1_R1.fastq", "s1_R2.fastq")):
+        session = self._stage_records(counts, names=names)
+        body = {"upload_id": str(session.id), "sample": "s1",
+                "population": "", "time_point": "", "arguments": ""}
+        if trim_reads is not None:
+            body["trim_reads"] = trim_reads
+        return self.client.post(
+            "/breseq/launch?experiment_id=%s" % self.experiment.id,
+            data=json.dumps(body), content_type="application/json")
+
+    def test_an_unequal_pair_is_split_and_the_run_still_succeeds(self):
+        """Neither tool fails on this -- both truncate to the shorter and exit 0, measured.
+
+        So the run has to succeed with every read analysed, and say what it did.
+        """
+        self._launch_records((12, 7))
+        run = BreseqRun.objects.get()
+
+        self.assertEqual(run.status, STATUS_IMPORTED, run.error)
+        self.assertEqual(len(run.notes), 1, run.notes)
+        note = run.notes[0]
+        self.assertIn("different numbers of reads", note)
+        self.assertIn("12", note)
+        self.assertIn("7", note)
+        self.assertIn("two single-end files", note)
+
+    def test_a_split_pair_reaches_fastp_as_two_single_ended_calls(self):
+        self._launch_records((12, 7))
+
+        calls = self._recorded_fastp()
+        self.assertEqual(len(calls), 2, "expected one fastp call per file")
+        for call in calls:
+            self.assertNotIn("-I", call["argv"], "fastp was still told these were mates")
+
+    def test_a_split_pair_reaches_breseq_under_a_name_it_will_not_pair(self):
+        """The load-bearing half: breseq works the pairing out for itself from the filenames,
+        so unpairing for fastp alone would leave breseq truncating exactly as before."""
+        from mutint_breseq import pairing
+
+        self._launch_records((12, 7))
+
+        reads = [arg for arg in self._recorded_argv()["argv"] if ".fastq" in arg]
+        self.assertEqual(len(reads), 2)
+        self.assertTrue(any("unpaired" in os.path.basename(path) for path in reads), reads)
+        # Asserted through breseq's own rule rather than by reading the name.
+        self.assertEqual([len(one.files) for one in pairing.read_file_sets(reads)], [1, 1])
+
+    def test_the_check_runs_when_trimming_is_off(self):
+        # fastp never appears, and breseq would truncate the pair on its own.
+        self._launch_records((12, 7), trim_reads=False)
+        run = BreseqRun.objects.get()
+
+        self.assertEqual(run.status, STATUS_IMPORTED, run.error)
+        self.assertEqual(len(run.notes), 1, run.notes)
+        self.assertFalse(self._recorded_fastp(), "fastp ran with trimming off")
+
+    def test_a_real_pair_is_left_alone(self):
+        self._launch_records((9, 9))
+        run = BreseqRun.objects.get()
+
+        self.assertEqual(run.status, STATUS_IMPORTED, run.error)
+        self.assertEqual(run.notes, [])
+        self.assertEqual(run.read_files, ["s1_R1.fastq", "s1_R2.fastq"])
+
+        calls = self._recorded_fastp()
+        self.assertEqual(len(calls), 1, "a real pair should be one paired fastp call")
+        self.assertIn("-I", calls[0]["argv"])
 
     # --- one drop, several samples ----------------------------------------------------------
 

@@ -121,6 +121,19 @@
                '<small>' + parts.join(" &nbsp;&middot;&nbsp; ") + "</small></td></tr>";
     }
 
+    // Things worth reading about a run that **worked**. `error` is for a failure and the fold
+    // below only opens for one, so neither would show a sample that imported but not quite as
+    // asked -- a pair split because its mates disagreed, say. Amber, not red: nothing went
+    // wrong, but somebody should know.
+    function noteRow(run) {
+        var notes = run.notes || [];
+        if (!notes.length) { return ""; }
+        return '<tr><td colspan="5" style="border-top: 0; padding-top: 0;">' +
+               notes.map(function (note) {
+                   return '<div style="color: #8a6d3b;"><small>' + esc(note) + "</small></div>";
+               }).join("") + "</td></tr>";
+    }
+
     function logRow(run) {
         if (!run.log || run.status !== "failed") { return ""; }
         return '<tr><td colspan="5" style="border-top: 0; padding-top: 0;">' +
@@ -147,7 +160,7 @@
                           "</small></td>",
                       "<td><small>" + esc(elapsed(run)) + "</small></td>",
                       "<td>" + resultCell(run) + "</td>",
-                      "</tr>", detailRow(run), logRow(run));
+                      "</tr>", detailRow(run), noteRow(run), logRow(run));
         });
         html.push("</tbody></table>");
         runsEl.innerHTML = html.join("");
