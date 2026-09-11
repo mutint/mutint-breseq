@@ -10,10 +10,11 @@ only by SHA inside that one clone. See the suite `CLAUDE.md`.
 
 ## What this is
 
-A page that runs breseq. Drop an experiment's FASTQ reads on `/breseq/`, name the sample, and
-breseq runs in the background against that experiment's stored reference; its output folder is
-then handed to **mutint-core's own `mutint_import.breseq_folder`**, so the sample that lands is
-indistinguishable from one analyzed elsewhere and dropped on the Add Data page.
+A page that runs breseq. Drop an experiment's FASTQ reads on `/breseq/` -- or name them by SRA
+accession, or both -- name the sample, and breseq runs in the background against that
+experiment's stored reference; its output folder is then handed to **mutint-core's own
+`mutint_import.breseq_folder`**, so the sample that lands is indistinguishable from one
+analyzed elsewhere and dropped on the Add Data page.
 
 That last clause is the design. This plugin does not import anything itself — it *produces the
 input* to core's importer and gets out of the way. Nothing here parses a `.gd`, writes a
@@ -36,7 +37,7 @@ a project's `.gitmodules` is how a component is not installed.
 | `read_names.py` | pure: what a read file's name says the sample is called, and which files are one sample |
 | `mate_check.py` | pure: whether two files that pair by name really are mates, and how to unpair them if not |
 | `tasks.py` | the `@task` — trim, run breseq, check, import, clean up |
-| `views.py` | the page, the launch endpoint, the preview, the run list |
+| `views.py` | the page, the launch endpoint, the preview, the run list; resolves accessions through core |
 | `models.py` | `BreseqRun`, and the receiver that owns its directory |
 | `static/mutint_breseq/launch.js` | the page's behaviour: the input-type menu, the boxes, the drop zone, the run list |
 
@@ -406,6 +407,70 @@ grouping the *uploaded* names would re-pair them and record a pairing that did n
 `mate_check.uploaded_name` takes the marker back out, so the file shown is the one dropped and
 the grouping says it stood alone.
 
+### Reads by accession: the fetch is core's, and the worker does it
+
+The accessions box beneath the drop zone takes a run, a sample, an experiment or a study, and
+**this plugin holds no rule about what any of those look like and no knowledge of ENA**:
+`mutint_import.accessions.parse` reads the box, `mutint_import.sra_fetch.resolve` asks ENA
+what each token is, and `sra_fetch.download` fetches the files -- see **Reads by accession
+come from ENA** in mutint-core's CLAUDE.md for the design and `docs/plugin/staging.md` for
+the guide. What is this plugin's is *when* each happens and *where the files land*.
+
+**Resolve at launch, before the claim, for `_preflight`'s reason.** An accession ENA does not
+know, a run with no FASTQ, a study past the caps -- each is refused while the answer is still
+"fix the box", with no run row, no reads moved and the session still open, and with
+`field: "accessions"` so the page can point at it. After the permission check, deliberately:
+a reader must not be able to make the installation ask ENA on their behalf, which is also why
+`preview` demands `can_edit_experiment` when the body carries accessions and only
+`can_view_project` otherwise. What the row stores is the *resolved* plan (`BreseqRun.accessions`,
+`sra.Plan.as_dict()` entries restricted to that row's runs), so the worker downloads what the
+launch resolved rather than forming a second opinion; `read_files` goes on listing every
+filename, ENA's included, so the run list needs no second reader.
+
+**Download in the task, inside the log, after `breseq_path()` and before the dry run.** A run
+is gigabytes, so a request that downloaded it would be bounded by nothing; the worker has the
+log (`/jobs/<pk>/log` shows each file as it arrives), the cancellation flag (asked between
+chunks, raising the same `Cancelled` the tool loop does) and a failure path that keeps the
+directory. After `breseq_path()` so a machine with no breseq fails in a second rather than
+after twenty gigabytes; before the dry run because breseq checks that its inputs exist. The
+files land in `reads/`, beside whatever was dropped, so everything downstream -- the mate
+check, trimming, breseq, the import -- treats a fetched file and a dropped one alike. ENA's
+names (`<run>_1.fastq.gz`, `_2`) already pair under breseq's rule, which is why nothing renames
+them. The run's deadline starts *after* the download: the budget guards a wedged tool, and a
+stalled mirror is already guarded by the download's own read timeout.
+
+**No session for a launch with nothing dropped.** The page opens a staging session only when
+files were selected and posts a blank `upload_id` otherwise; `launch` reads that as "no staged
+files" and the accessions as the rest. A session exists to receive bytes, and opening one to
+close it unused would be the zero-file staging session `build_manifest`'s docstring calls a
+caller's mistake -- so core's session code is untouched. The cost is one branch in `launch`
+and that every refusal past that point abandons a session only if there is one. "Neither files
+nor accessions" is refused in one sentence.
+
+**Which runs are one sample is core's rule; what it is called passes through this plugin's.**
+`sra.samples_in` makes one sample of every run under a sample or experiment accession and one
+per BioSample in a study, and `sra.sample_name_for` names it by ENA's `sample_alias` --
+`REL768A` for the LTEE's clones -- falling back to the accession when the alias fails the
+`usable` test, which is `SAMPLE_NAME_RE` passed in from here: the name becomes a directory and
+a coordinate, exactly as a typed one does. In the two single-sample modes an accession's files
+simply join the one sample; in `read_names` mode each accession is a row of its own beside the
+rows the dropped names derive. Two rows with one name -- an alias equal to a derived name, or
+two accessions sharing an alias -- are refused as a clash rather than launched to supersede
+each other. A dropped file named like a file about to be downloaded is refused too, at 409,
+because both go into one `reads/`.
+
+**The sample records the run, not the files.** `_record_read_sources` takes `download`'s
+`{filename: run_accession}` and writes one `KIND_SRA` entry per run per read group in place
+of a `KIND_READS` entry per file -- the shape `mutint_sample.inputs` promised when the kind was
+reserved: the accession is what was given, and what it expanded to is the downloader's
+business. Nothing on disk says which files were fetched; that map is in memory for the length
+of the task and nowhere else.
+
+**The preview asks ENA too**, once per `change` of the box rather than per keystroke, and
+draws what each accession resolved to -- alias, title, runs, bytes -- in every mode, because a
+person is deciding whether this is the run they meant before hours are spent on it. It is the
+same `_accession_samples` the launch uses, so the two cannot disagree about a name.
+
 ### breseq is asked whether it would accept the command line, twice
 
 `breseq --dry-run` validates every option, checks that bowtie2, samtools and gnuplot are
@@ -608,7 +673,7 @@ cd mutint && ./mutint test mutint_breseq
 
 There is no way to run them from mutint-core: the plugin is not installed there.
 
-**177 tests**, and the end-to-end ones are affordable because of two things. The test runner
+**199 tests**, and the end-to-end ones are affordable because of two things. The test runner
 forces `django.tasks` to its immediate backend, so `.enqueue()` runs inline and one POST
 exercises launch, the subprocess, the ingest and the cleanup. And `tests/fake_breseq.py` is a
 **real executable on disk** rather than a `subprocess.run` patch — the two things most likely

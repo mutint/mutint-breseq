@@ -18,15 +18,16 @@ from django.test import TestCase, override_settings
 
 from mutint_common import store
 from mutint_experiment.models import Project
-from mutint_import import staging
+from mutint_import import sra_fetch, staging
 from mutint_import.tests import breseq_fixture
+from mutint_import.tests.test_sra_fetch import _row, fake_ena, no_delay
 from mutint_jobs import jobs as jobs_api
 # The process-group helpers live with the loop they were written for, in core.
 from mutint_jobs.tests.test_processes import wait_until_gone
 
 from mutint_breseq import tasks
 from mutint_breseq.models import STATUS_CANCELLED, BreseqRun
-from mutint_breseq.tests import fake_breseq, fake_fastp
+from mutint_breseq.tests import fake_breseq, fake_fastp, fastq_fixture
 from mutint_breseq.tests.test_launch import establish_reference
 
 
@@ -174,6 +175,41 @@ class CancelledRunTestCase(TestCase):
         self.assertTrue(calls, "the preflight never ran")
         self.assertTrue(all(call["dry_run"] for call in calls),
                         "breseq was started for real after the cancel")
+
+    def test_a_cancel_during_the_download_deletes_the_partial_file_and_never_starts_breseq(self):
+        """The download polls the same flag the tool loop does, between chunks; a cancel that
+        lands mid-file ends the run there, with nothing left on disk that breseq could read."""
+        reads = fastq_fixture.write(os.path.join(self.template_root, "r.fastq.gz"), count=64)
+        with open(reads, "rb") as handle:
+            data = handle.read()
+        rows = {"SRR1": [_row(run="SRR1", files=[("SRR1.fastq.gz", data)])]}
+
+        with mock.patch("mutint_import.sra_fetch.requests.get",
+                        side_effect=fake_ena(rows, {"SRR1.fastq.gz": data})):
+            response = self.client.post(
+                "/breseq/launch?experiment_id=%s" % self.experiment.id,
+                data=json.dumps({"upload_id": "", "accessions": "SRR1", "sample": "s1",
+                                 "population": "", "time_point": "", "arguments": ""}),
+                content_type="application/json")
+            self.assertEqual(response.status_code, 200, response.content)
+            run = BreseqRun.objects.get()
+
+            # Not cancelled at entry; cancelled at the first poll after it, which is inside
+            # the download once the poll gap is zero.
+            with no_delay(), mock.patch.object(sra_fetch, "CANCEL_POLL_SECONDS", 0), \
+                    mock.patch.object(tasks.jobs, "is_cancelled",
+                                      side_effect=[False] + [True] * 50):
+                self.assertIsNone(tasks.run_breseq.call(None, run.pk))
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, STATUS_CANCELLED)
+        self.assertFalse(os.path.exists(run.reads_dir()))
+        # The launch's preflight is a dry run and is recorded; the worker's dry run comes
+        # after the download and must not have happened, let alone the real run.
+        with open(os.path.join(self.template_root, "argv.json")) as handle:
+            calls = [json.loads(line) for line in handle if line.strip()]
+        self.assertEqual(1, len(calls), "breseq was started after the cancel")
+        self.assertTrue(calls[0]["dry_run"])
 
     def test_relaunching_the_same_sample_stops_the_run_already_under_way(self):
         """Two runs writing one sample race, and the import supersedes a sample's calls

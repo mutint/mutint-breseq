@@ -29,7 +29,7 @@ from django.utils import timezone
 
 from mutint_common import store
 from mutint_common.tools import ToolMissing
-from mutint_import import breseq_folder, import_lock
+from mutint_import import breseq_folder, import_lock, sra_fetch
 from mutint_import.import_lock import ImportInProgress
 from mutint_jobs import jobs, logs, processes
 from mutint_sample import inputs
@@ -315,16 +315,40 @@ def run_breseq(context, run_id):
         _fail(run, str(missing))
         raise
 
-    reads = sorted(
-        os.path.join(run.reads_dir(), name) for name in os.listdir(run.reads_dir()))
-    # One budget for the whole run. fastp is minutes against breseq's hours, so it is not
-    # given a clock of its own; what it uses comes off what breseq is then allowed.
-    deadline = time.monotonic() + _timeout()
-
-    # One log for the whole run, opened once and written by fastp, by breseq and by the lines
-    # below -- so `/jobs/<pk>/log` shows the run's account in the order it happened, while it
-    # is still happening. Everything after this point is inside it.
+    # One log for the whole run, opened once and written by the download, by fastp, by breseq
+    # and by the lines below -- so `/jobs/<pk>/log` shows the run's account in the order it
+    # happened, while it is still happening. Everything after this point is inside it.
     with logs.open_log(queue_id) as log:
+        # Reads named by accession are fetched here, on the worker, and not at launch: a run
+        # is gigabytes, and a request that downloaded it would be bounded by nothing. After
+        # `breseq_path()` so a machine with no breseq fails in a second rather than after
+        # twenty gigabytes, and before the dry run, which checks that its inputs exist. The
+        # download is core's (`mutint_import.sra_fetch`); what is this plugin's is where the
+        # files land -- `reads/`, beside whatever was dropped, so everything from here on
+        # treats a fetched file and a dropped one alike. `downloaded` is what tells them apart
+        # afterwards, for the record of what the sample was made from.
+        downloaded = {}
+        if run.accessions:
+            try:
+                downloaded = sra_fetch.download(
+                    run.reads_dir(), run.accessions,
+                    report=lambda message: logs.write(log, message),
+                    is_cancelled=lambda: jobs.is_cancelled(queue_id))
+            except processes.Cancelled:
+                _cancelled(run, log=_tail(queue_id, run))
+                return None
+            except sra_fetch.FetchError as failed:
+                _fail(run, str(failed), log=_tail(queue_id, run))
+                raise
+
+        reads = sorted(
+            os.path.join(run.reads_dir(), name) for name in os.listdir(run.reads_dir()))
+        # One budget for the whole run. fastp is minutes against breseq's hours, so it is not
+        # given a clock of its own; what it uses comes off what breseq is then allowed. It
+        # starts after the download, deliberately: the budget guards a wedged tool, and a
+        # stalled mirror is already guarded by the download's own read timeout.
+        deadline = time.monotonic() + _timeout()
+
         # Asked before anything is trimmed, and asked again here having already been asked at
         # launch. Not redundant: `views._preflight` checks the box on the web host, and this
         # checks the machine that will actually do the work -- a `db_worker` started outside
@@ -479,7 +503,7 @@ def run_breseq(context, run_id):
     sample = _imported_sample(experiment, run.sample_name)
     if run.population_sample:
         _mark_population_sample(sample)
-    _record_read_sources(sample, reads, paired)
+    _record_read_sources(sample, reads, paired, downloaded)
     # Everything worth keeping -- data/'s four files and breseq's HTML report -- is already in
     # the store under the sample, put there by the importer above.
     runner.cleanup_after_import(run.directory(), run.output_dir())
@@ -522,8 +546,15 @@ def _mark_population_sample(sample):
     sample.save(update_fields=["is_clonal"])
 
 
-def _record_read_sources(sample, reads, paired):
+def _record_read_sources(sample, reads, paired, downloaded=None):
     """Tell core what this sample was made from: the reads, and which of them were mates.
+
+    **A file fetched by accession is recorded as the run it came from**, one `KIND_SRA` entry
+    per run in each group rather than one `KIND_READS` entry per file -- the shape
+    `mutint_sample.inputs` promised the day the kind was reserved: the accession is what was
+    given, and what it expanded to is the downloader's business. `downloaded` is
+    `sra_fetch.download`'s `{filename: run_accession}`, and it is what tells a fetched file
+    from a dropped one sitting beside it; nothing on disk says.
 
     **Replacing what the importer just wrote**, which for a folder this plugin built is the
     folder's own name or the `#=READSEQ` lines breseq put in the `.gd`. The reads this run was
@@ -546,13 +577,22 @@ def _record_read_sources(sample, reads, paired):
     if sample is None or not reads:
         return
 
+    downloaded = downloaded or {}
     entries = []
     for group, read_set in enumerate(
             pairing.read_file_sets(list(reads), paired=paired), start=1):
+        runs_seen = []
         for position, path in enumerate(read_set.files, start=1):
+            name = os.path.basename(mate_check.uploaded_name(path))
+            if name in downloaded:
+                if downloaded[name] not in runs_seen:
+                    runs_seen.append(downloaded[name])
+                continue
             entries.append(inputs.Input(
                 inputs.KIND_READS, mate_check.uploaded_name(path), group,
                 position if len(read_set.files) == 2 else None))
+        for accession in runs_seen:
+            entries.append(inputs.Input(inputs.KIND_SRA, accession, group, None))
     inputs.record_inputs(sample, entries)
 
 

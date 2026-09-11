@@ -37,9 +37,10 @@
         cannot start anything new.{% endif %}
     </div>
 {% else %}
-    <p>Drop this sample's FASTQ read files below. They are uploaded, then breseq runs against
-       <b>{{ experiment.name }}</b>'s reference genome and its output is imported as one
-       sample.</p>
+    <p>Drop this sample's FASTQ read files below, or name them by SRA accession, or both.
+       Dropped files are uploaded and accessions are fetched from ENA's mirror of the archive;
+       then breseq runs against <b>{{ experiment.name }}</b>'s reference genome and its output
+       is imported as one sample.</p>
 
     <form id="breseq-form">
         {% csrf_token %}
@@ -190,6 +191,26 @@
             <p style="margin: 0; font-size: 1.1em;">Drag &amp; drop this sample's read files
                here, or click to choose.</p>
             <input type="file" id="breseq-file-input" multiple style="display: none;">
+        </div>
+
+        {% comment %} Modelled on the Import data page's NCBI box. The server resolves what is
+           typed against ENA -- on a change here, for the preview, and again at launch -- and
+           the plugin itself holds no rule about what an accession looks like: that is
+           `mutint_import.sra`. {% endcomment %}
+        <div class="form-group" style="margin-top: 1em;">
+            <label for="breseq-accessions">Or fetch reads from the SRA by accession</label>
+            <textarea id="breseq-accessions" class="form-control" rows="2"
+                      placeholder="SRR2584863, SAMN04096083, SRX1317390, PRJNA295606"></textarea>
+            <small class="help-block" style="margin-bottom: 0;">
+                A run (<code>SRR</code>), a sample (<code>SRS</code>, <code>SAMN</code>), an
+                experiment (<code>SRX</code>) or a study (<code>SRP</code>,
+                <code>PRJNA</code>), separated by commas, spaces or new lines. Every run under
+                a sample or experiment is one sample's reads; a study is one sample per
+                BioSample in it. With <i>metadata from read names</i> chosen, each accession is
+                a sample of its own, called what its submitter called it &mdash; or the
+                accession, when that is not a name MutInt can use. The reads are downloaded by
+                the worker, so the launch is quick and the download shows in the run's log.
+            </small>
         </div>
 
         {% comment %} A div rather than a list: in the read-names mode this holds the table of

@@ -116,6 +116,14 @@
             parts.push("<b>Reads</b> " + esc(run.read_files.join(", ")) +
                        (run.trim_reads ? " (trimmed with fastp)" : " (untrimmed)"));
         }
+        if ((run.accessions || []).length) {
+            parts.push("<b>From the SRA</b> " + run.accessions.map(function (plan) {
+                var runs = plan.runs || [];
+                var detail = runs.length === 1 && runs[0] === plan.typed
+                    ? "" : " (" + runs.length + " run" + (runs.length === 1 ? "" : "s") + ")";
+                return esc(plan.typed) + esc(detail);
+            }).join(", "));
+        }
         if (!parts.length) { return ""; }
         return '<tr><td colspan="5" style="border-top: 0; padding-top: 0; color: #666;">' +
                '<small>' + parts.join(" &nbsp;&middot;&nbsp; ") + "</small></td></tr>";
@@ -440,6 +448,11 @@
     var progressEl = document.getElementById("breseq-progress");
     var progressBar = document.getElementById("breseq-progress-bar");
     var progressText = document.getElementById("breseq-progress-text");
+    var accessionsEl = document.getElementById("breseq-accessions");
+
+    function accessionsText() {
+        return accessionsEl ? accessionsEl.value.trim() : "";
+    }
 
     function humanBytes(size) {
         if (size < 1024) { return size + " B"; }
@@ -459,6 +472,34 @@
     // one -- the same guard the run list's poll uses, and for the same reason.
     var previewGeneration = 0;
 
+    // What ENA said about an accession sample, under its files: where the name came from and
+    // how much is about to be downloaded. A person is deciding whether this is the run they
+    // meant before hours are spent on it, and the alias and title are what tell them.
+    function accessionNote(sample) {
+        if (!sample.accession) { return ""; }
+        var bits = ["from " + esc(sample.accession)];
+        if (sample.alias && sample.alias !== sample.name) {
+            bits.push("alias " + esc(sample.alias));
+        }
+        if (sample.title) { bits.push(esc(sample.title)); }
+        bits.push((sample.runs || []).length + " run" +
+                  ((sample.runs || []).length === 1 ? "" : "s") + ", " +
+                  humanBytes(sample.bytes || 0));
+        return '<br><span style="color: #31708f;">' + bits.join(" &middot; ") + "</span>";
+    }
+
+    // The single-sample modes draw no table -- everything is one sample -- but an accession
+    // is still worth a line saying what it resolved to, for the same reason as above.
+    function accessionListHtml(samples) {
+        var rows = samples.filter(function (sample) { return sample.accession; });
+        if (!rows.length) { return ""; }
+        return "<ul>" + rows.map(function (sample) {
+            return "<li><b>" + esc(sample.accession) + "</b> <small style='color: #666;'>" +
+                   esc(sample.files.join(", ")) + "</small>" + accessionNote(sample) +
+                   "</li>";
+        }).join("") + "</ul>";
+    }
+
     function previewHtml(samples) {
         var head = '<table class="table table-condensed" style="margin-top: 1em;">' +
                    "<thead><tr><th>Sample</th><th>Population</th><th>Time point</th>" +
@@ -473,7 +514,7 @@
                   "point in the name &mdash; filed under Unspecified</small></td>";
             return "<tr><td><b>" + esc(sample.name) + "</b></td>" + placed +
                    '<td><small style="color: #666;">' + esc(sample.files.join(", ")) +
-                   "</small></td><td>" +
+                   accessionNote(sample) + "</small></td><td>" +
                    (sample.replaces
                        ? '<small style="color: #8a6d3b;">replaces ' + esc(sample.replaces) +
                          "</small>"
@@ -493,34 +534,57 @@
         previewGeneration += 1;
         var mine = previewGeneration;
         var names = selected.map(function (entry) { return entry.path; });
+        var typed = accessionsText();
+        var readNames = currentMode() === "read_names";
 
         fileListEl.innerHTML = fileListHtml() +
-            '<p style="color: #666; margin-top: 1em;">Reading the names…</p>';
+            '<p style="color: #666; margin-top: 1em;">' +
+            (typed ? "Asking ENA about the accessions…" : "Reading the names…") + "</p>";
 
         mutintPostJson("/breseq/preview?experiment_id=" + EXPERIMENT_ID,
-                       { names: names, arguments: argsInput.value })
+                       { names: names, accessions: typed, arguments: argsInput.value })
             .then(function (body) {
                 if (mine !== previewGeneration) { return; }
                 var samples = body.samples || [];
+                if (!readNames) {
+                    // One sample whatever was given; only the accessions need describing.
+                    fileListEl.innerHTML = fileListHtml() + accessionListHtml(samples);
+                    return;
+                }
+                var sources = [];
+                if (names.length) {
+                    sources.push(names.length + " file" + (names.length === 1 ? "" : "s"));
+                }
+                var fetched = samples.filter(function (s) { return s.accession; }).length;
+                if (fetched) {
+                    sources.push(fetched + " accession" + (fetched === 1 ? "" : "s"));
+                }
                 fileListEl.innerHTML =
                     "<p><b>" + samples.length + "</b> sample" +
-                    (samples.length === 1 ? "" : "s") + " from " + names.length + " file" +
-                    (names.length === 1 ? "" : "s") + ":</p>" + previewHtml(samples);
+                    (samples.length === 1 ? "" : "s") + " from " + sources.join(" and ") +
+                    ":</p>" + previewHtml(samples);
             })
             .catch(function (err) {
                 if (mine !== previewGeneration) { return; }
-                // The launch derives the names itself, so a preview that could not be fetched
-                // costs the reader a description and not the ability to launch.
+                // The launch derives the names and resolves the accessions itself, so a
+                // preview that could not be fetched costs the reader a description and not
+                // the ability to launch -- except that an accession ENA refused here will be
+                // refused there too, so the sentence is worth reading.
                 fileListEl.innerHTML = fileListHtml() +
-                    '<p style="color: #8a6d3b;">Could not work out what these files will be ' +
-                    "called: " + esc(err.message || String(err)) + "</p>";
+                    '<p style="color: #8a6d3b;">' +
+                    (err.body && err.body.field === "accessions"
+                        ? "" : "Could not work out what these files will be called: ") +
+                    esc(err.message || String(err)) + "</p>";
             });
     }
 
     function renderList() {
-        submitBtn.disabled = !selected.length;
-        if (!selected.length) { fileListEl.innerHTML = ""; return; }
-        if (currentMode() === "read_names") { renderPreview(); return; }
+        var typed = accessionsText();
+        submitBtn.disabled = !selected.length && !typed;
+        if (!selected.length && !typed) { fileListEl.innerHTML = ""; return; }
+        // The table is drawn whenever an accession is typed, whatever the mode: what an
+        // accession resolved to is worth seeing before the download is committed to.
+        if (currentMode() === "read_names" || typed) { renderPreview(); return; }
         previewGeneration += 1;   // any preview still in flight is for a mode we have left
         fileListEl.innerHTML = fileListHtml();
     }
@@ -568,9 +632,19 @@
         mutintCollectDropped(e.dataTransfer).then(addEntries);
     });
 
+    if (accessionsEl) {
+        // Typing enables the button at once; the preview waits for `change` -- leaving the
+        // box -- because each preview is a round trip to ENA per accession, and a table that
+        // redrew on every keystroke would ask about `S`, `SR`, `SRR`...
+        accessionsEl.addEventListener("input", function () {
+            submitBtn.disabled = !selected.length && !accessionsText();
+        });
+        accessionsEl.addEventListener("change", renderList);
+    }
+
     form.addEventListener("submit", function (e) {
         e.preventDefault();
-        if (!selected.length) { return; }
+        if (!selected.length && !accessionsText()) { return; }
         errorEl.innerHTML = "";
         // Only when a limit was asked for -- a disabled input is barred from constraint
         // validation and always reports itself valid, so the checkbox has to be asked first.
@@ -588,14 +662,23 @@
         submitBtn.disabled = true;
         setProgress(0, 1, "Preparing…");
 
-        mutintUpload(selected, {
-            experimentId: EXPERIMENT_ID,
-            consumer: COMPONENT,
-            onProgress: setProgress
-        }).then(function (uploadId) {
-            setProgress(1, 1, "Queueing the run…");
+        // No session when nothing was dropped: a session exists to receive bytes, and a
+        // launch whose reads are all fetched by accession has none. The server reads a blank
+        // id as "no staged files" and the accessions as the rest.
+        var upload = selected.length
+            ? mutintUpload(selected, {
+                experimentId: EXPERIMENT_ID,
+                consumer: COMPONENT,
+                onProgress: setProgress
+            })
+            : Promise.resolve("");
+
+        upload.then(function (uploadId) {
+            setProgress(1, 1, accessionsText() ? "Resolving the accessions and queueing the run…"
+                                               : "Queueing the run…");
             return mutintPostJson("/breseq/launch?experiment_id=" + EXPERIMENT_ID, {
                 upload_id: uploadId,
+                accessions: accessionsText(),
                 // **The mode decides what naming the server is being handed**, and the three
                 // are genuinely different contracts rather than one with optional fields:
                 // `parts` posts a coordinate for the server to compose, `name` posts the name
@@ -622,6 +705,9 @@
             // common case the one that costs the most typing. The Sample box is the thing to
             // change before the next drop, and it is left in view rather than emptied.
             selected = [];
+            // The accessions go with the files, and for the same reason: they are the run's
+            // input, and left in the box the next press would supersede the run just launched.
+            if (accessionsEl) { accessionsEl.value = ""; }
             renderList();
             // A run already in flight for this sample was asked to stop -- its output was
             // about to be overwritten by this one. Said here because it happened on the
@@ -635,6 +721,9 @@
         }).catch(function (err) {
             progressEl.style.display = "none";
             renderError(err.message || String(err));
+            if (err.body && err.body.field === "accessions" && accessionsEl) {
+                accessionsEl.focus();
+            }
         }).then(function () {
             renderList();
         });

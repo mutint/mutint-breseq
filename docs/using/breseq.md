@@ -38,10 +38,53 @@ breseq, and every run fails identically.
    every read is used; 60&ndash;80 is recommended for clonal samples.
 5. Optionally type **breseq arguments**, and deselect **Trim reads with fastp first** if you do
    not want the reads trimmed.
-6. Drop the sample's read files, and press **Run breseq**.
+6. Drop the sample's read files, or type SRA accessions into the box beneath the drop zone
+   — see *Reads from the SRA* below — or both, and press **Run breseq**.
 
-Everything you drop is one sample's reads — both mates of a pair, or several lanes. To analyze
-a second sample, launch again.
+Everything you drop or name is one sample's reads — both mates of a pair, or several lanes,
+or a run fetched from the archive beside a file of your own. To analyze a second sample,
+launch again; or choose the third input type, under which each file set and each accession is
+a sample of its own.
+
+## Reads from the SRA
+
+Type accessions into **Or fetch reads from the SRA by accession**, separated by commas,
+spaces or new lines. Four kinds are accepted:
+
+| kind | looks like | becomes |
+|---|---|---|
+| a run | `SRR2584863`, `ERR…`, `DRR…` | that run's reads |
+| a sample | `SAMN04096083`, `SRS…`, `SAMEA…` | every run sequenced from that BioSample, as one sample |
+| an experiment | `SRX1317390`, `ERX…` | every run of that library, as one sample |
+| a study | `PRJNA295606`, `SRP…`, `ERP…` | one sample per BioSample in the study |
+
+The reads are fetched from [ENA](https://www.ebi.ac.uk/ena/browser/home), the European
+mirror of the archive, which serves each run's FASTQ files with a checksum beside each; every
+file is verified against it after download. No tool is installed for this and nothing needs
+configuring. A run ENA has no FASTQ for — one submitted as an alignment, or one not yet
+mirrored from NCBI — is refused with a sentence naming it; the archive usually catches up
+within a few days.
+
+**What an accession is called.** Under the first two input types, an accession's reads join
+the one sample you named, exactly as a dropped file would. Under *metadata from read names*,
+each accession is a sample of its own, and it is called what its submitter called it — ENA's
+*sample alias*, which is `REL768A` for the long-term evolution experiment's clones and is the
+coordinate you typed for anything you submitted from an experiment like this one. An alias
+that is blank, or that is not a name MutInt can use, falls back to the accession itself (or,
+for a member of a study, to its BioSample). The preview under the box says what each accession
+resolved to before you launch — the alias, the submitter's title, the runs and how much there
+is to download — so you can see that it is the run you meant.
+
+**The download happens on the worker, not in your browser.** Pressing **Run breseq** checks
+the accessions with ENA and queues the run; the run's log then shows each file as it arrives,
+and **Cancel** on the Jobs page stops a download the same way it stops breseq. A launch is
+refused before anything is queued if it would fetch more than `MUTINT_SRA_MAX_RUNS` runs or
+`MUTINT_SRA_MAX_BYTES` bytes in total — fifty runs and twenty gigabytes by default — which is
+what stops a pasted BioProject from becoming a day of downloads. See *Configuration* to raise
+them.
+
+A sample made from an accession records the run it came from, and the sample's page links it
+to the archive.
 
 ## Three ways to name a sample
 

@@ -91,6 +91,13 @@ class BreseqRun(models.Model):
     # The basenames dropped, so the run list can say what it was given after the reads are
     # deleted. Not paths: nothing resolves these, they are for a person to read.
     read_files = models.JSONField(default=list)
+    # The SRA accessions this run fetches its reads from, as the *resolved* plans --
+    # `mutint_import.sra.Plan.as_dict()` entries, restricted to the runs that are this row's --
+    # rather than the text somebody typed, so the worker downloads what the launch resolved and
+    # gets no second opinion about what was meant. Empty is a run whose reads were all dropped.
+    # `read_files` above still lists every filename, ENA's basenames included, so the run list
+    # needs no second reader.
+    accessions = models.JSONField(default=list)
 
     # Things a person should read about a run that **worked**. `error` is the failure message
     # and the run list only folds the log open for a failure, so neither is a home for "this

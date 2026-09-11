@@ -1,10 +1,12 @@
 <p><b>Run breseq</b> from the browser. Drop an experiment's FASTQ read files on
-    <code>/breseq/</code>, name the sample, and breseq is run in the background against the
+    <code>/breseq/</code> or name them by SRA accession &mdash; a run, a sample, an experiment
+    or a study, fetched from ENA's mirror &mdash; name the sample, and breseq is run in the background against the
     reference genome that experiment already holds. What it produces is imported exactly as a
     breseq folder dropped on the Add Data page would be, so the sample that appears is
     indistinguishable from one analyzed elsewhere and uploaded.</p>
-<p>One launch is one sample: every file dropped is that sample's reads — both mates of a pair,
-    or several lanes. The single arguments box is passed through to breseq as typed, so
+<p>One launch is one sample: every file dropped or fetched is that sample's reads — both mates
+    of a pair, or several lanes — unless the input type says each file set and each accession
+    is a sample of its own. The single arguments box is passed through to breseq as typed, so
     anything its own documentation describes is available; the processor count defaults to
     every core on the machine unless you set it yourself. Reads are adapter-trimmed with
     fastp first unless you deselect the box, pairs together and long reads left alone, and

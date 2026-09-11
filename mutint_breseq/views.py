@@ -31,7 +31,7 @@ from mutint_experiment.permissions import (
     experiment_lock_refusal,
 )
 from mutint_common.tools import ToolMissing
-from mutint_import import reference_store, sample_names, staging
+from mutint_import import accessions, reference_store, sample_names, sra, sra_fetch, staging
 from mutint_jobs import jobs as jobs_api
 from mutint_jobs import processes
 from mutint_import.upload_session import UploadError
@@ -245,6 +245,12 @@ def _run_rows(experiment):
             "sample_name": run.sample_name,
             "arguments": run.arguments,
             "read_files": run.read_files,
+            # Which accessions this run fetched reads for, as `{typed, kind, runs: [...]}`
+            # -- the plans it was launched with, for the detail row to name.
+            "accessions": [{"typed": plan.get("typed", ""), "kind": plan.get("kind", ""),
+                            "runs": [run_entry.get("accession", "")
+                                     for run_entry in plan.get("runs") or []]}
+                           for plan in (run.accessions or [])],
             "trim_reads": run.trim_reads,
             "population_sample": run.population_sample,
             "coverage_limit": run.coverage_limit,
@@ -433,11 +439,13 @@ def _preflight(experiment, arguments, polymorphism=False, coverage_limit=None):
 
 @require_POST
 def launch(request):
-    """Take a staged drop and start a run.
+    """Take a staged drop, a list of SRA accessions, or both, and start a run.
 
-    Body: {upload_id, sample_name, arguments, trim_reads, population_sample,
-    coverage_limit}; `trim_reads` defaults to true, `population_sample` to false, and
-    `coverage_limit` is blank for every read.
+    Body: {upload_id, accessions, input_mode, sample_name | population, time_point, sample,
+    arguments, trim_reads, population_sample, coverage_limit}; `trim_reads` defaults to true,
+    `population_sample` to false, and `coverage_limit` is blank for every read. `upload_id`
+    is blank when nothing was dropped -- the page opens no session for a launch that has no
+    bytes to stage -- and `accessions` is blank when nothing was typed; one of them is not.
 
     Gated on `can_edit_experiment` and **not** `can_edit_project`: what this eventually writes
     is a sample everybody sees, so a locked experiment has to refuse it, and a predicate handed
@@ -501,6 +509,17 @@ def launch(request):
     except CoverageLimitError as refusal:
         return JsonResponse({"error": str(refusal), "field": "coverage_limit"}, status=400)
 
+    # SRA accessions, resolved against ENA now and not in the worker, for the reason the
+    # preflight below runs before the claim: a typo should cost the round trip that caught it
+    # and nothing else -- no run row, no reads moved, the session still open. After the
+    # permission check, deliberately: a visitor who may not write here must not be able to
+    # make the installation ask ENA on their behalf. What is stored is the resolved plan, so
+    # the worker downloads what this resolved rather than forming a second opinion.
+    try:
+        plans = _resolve_accessions(payload.get("accessions"))
+    except (accessions.AccessionError, sra_fetch.FetchError) as refusal:
+        return JsonResponse({"error": str(refusal), "field": "accessions"}, status=400)
+
     # Asked of breseq itself, and asked here rather than after the upload is claimed so that a
     # typo costs nothing: no run row, no reads moved, the session still open to launch again.
     refusal = _preflight(experiment, arguments, polymorphism=population_sample,
@@ -508,48 +527,84 @@ def launch(request):
     if refusal:
         return JsonResponse({"error": refusal}, status=400)
 
-    session, error = staging.session_for(request, payload.get("upload_id"), COMPONENT)
-    if error:
-        return error
-    if session.experiment_id != experiment.id:
-        # Two ids arrive from the client and nothing else stops one experiment's session being
-        # launched against another's reference.
-        return JsonResponse({"error": "That upload belongs to another experiment."},
-                            status=409)
+    # **No session is no files, and is not an error.** The page opens a staging session only
+    # when something was dropped: a session exists to receive bytes, and a launch whose reads
+    # are all fetched by accession has none to stage. So every refusal from here on abandons
+    # a session only if there is one, and "nothing at all" is refused below in one sentence.
+    session = None
+    staged = {}
+    upload_id = (payload.get("upload_id") or "").strip()
+    if upload_id:
+        session, error = staging.session_for(request, upload_id, COMPONENT)
+        if error:
+            return error
+        if session.experiment_id != experiment.id:
+            # Two ids arrive from the client and nothing else stops one experiment's session
+            # being launched against another's reference.
+            return JsonResponse({"error": "That upload belongs to another experiment."},
+                                status=409)
 
-    try:
-        staged_root = staging.claim(session)
-    except UploadError as exc:
-        return JsonResponse({"error": str(exc)}, status=409)
+        try:
+            staged_root = staging.claim(session)
+        except UploadError as exc:
+            return JsonResponse({"error": str(exc)}, status=409)
+        staged = _staged_files(staged_root)
 
-    staged = _staged_files(staged_root)
-    if not staged:
-        staging.abandon(session)
-        return JsonResponse({"error": "No read files were uploaded."}, status=400)
+    def abandon():
+        if session is not None:
+            staging.abandon(session)
 
+    if not staged and not plans:
+        abandon()
+        return JsonResponse(
+            {"error": "Drop read files, or type an SRA accession."}, status=400)
+
+    # A dropped file may not sit where a download is about to land: both go into one
+    # `reads/`, and the download would overwrite the drop. Named now, while the answer is
+    # still "rename it", rather than as a checksum failure hours later.
+    clashing = sorted(set(staged) & set(sra.filenames_by_run(plans)))
+    if clashing:
+        abandon()
+        return JsonResponse(
+            {"error": "%s is also the name of a file %s would download. Rename it, or "
+                      "drop it on its own." % (clashing[0], _run_for(plans, clashing[0])),
+             "field": "upload"}, status=409)
+
+    # The plan: one (sample, its files, the accession plans whose runs are its) per run row.
+    # In the two single-sample modes everything -- dropped and fetched alike -- is that one
+    # sample's reads; in read-names mode each accession is a sample of its own beside the
+    # samples the dropped names derive, named by ENA's alias or by the accession.
     if mode == MODE_READ_NAMES:
         paired = "--no-paired-mapping" not in runner.split_arguments(arguments)
-        plan = read_names.derive_samples(sorted(staged), paired=paired)
-        for sample in plan:
+        plan = []
+        for sample in read_names.derive_samples(sorted(staged), paired=paired):
             try:
                 _check_name_is_usable(sample.name, "upload")
             except sample_names.SampleNameError as refusal:
-                staging.abandon(session)
+                abandon()
                 return JsonResponse(
                     {"error": "%s could not be a sample name: %s" % (sample.name, refusal),
                      "field": "upload"}, status=400)
+            plan.append((sample, []))
+        plan.extend(_accession_samples(plans))
+        clash = _name_clash(plan)
+        if clash:
+            abandon()
+            return JsonResponse({"error": clash, "field": "accessions"}, status=400)
     else:
-        plan = [read_names.DerivedSample(sample_name, sorted(staged))]
+        plan = [(read_names.DerivedSample(
+                    sample_name, sorted(staged) + sorted(sra.filenames_by_run(plans))),
+                 [p.as_dict() for p in plans])]
 
     # **Every name superseded before any row exists.** Called inside the loop below, run two's
     # supersede would cancel run one from this same launch -- it matches on the sample name and
     # knows nothing about which launch a row came from.
     superseded = sum(_supersede_in_flight(experiment, sample.name, request.user)
-                     for sample in plan)
+                     for sample, _plans in plan)
 
     runs = []
     try:
-        for sample in plan:
+        for sample, plan_dicts in plan:
             run = BreseqRun.objects.create(
                 experiment=experiment,
                 created_by=request.user if request.user.is_authenticated else None,
@@ -558,9 +613,13 @@ def launch(request):
                 trim_reads=bool(payload.get("trim_reads", True)),
                 population_sample=population_sample,
                 coverage_limit=coverage_limit,
+                accessions=plan_dicts,
                 status=STATUS_QUEUED)
             runs.append(run)
-            run.read_files = _take_reads(staged, run, sample.files)
+            # Only the dropped share is moved; the rest is fetched by the worker into the
+            # same directory. `read_files` lists both, being what a person is shown.
+            taken = _take_reads(staged, run, [name for name in sample.files if name in staged])
+            run.read_files = sorted(set(taken) | set(sample.files))
             run.save(update_fields=["read_files"])
     except Exception as exc:
         # **All of them, not the one that failed.** Each row owns its own directory and its
@@ -571,13 +630,14 @@ def launch(request):
                          experiment.id)
         for run in runs:
             run.delete()
-        staging.abandon(session)
+        abandon()
         return JsonResponse({"error": "The uploaded reads could not be stored: %s" % exc},
                             status=500)
 
     # The staged copy is gone by here; the reads live under each run's own directory, which
     # that run's post_delete receiver owns. Nothing is left for core's reaper to be racing.
-    staging.close(session)
+    if session is not None:
+        staging.close(session)
 
     for run in runs:
         # Through mutint_jobs rather than `task.enqueue` directly, which is what puts the run on
@@ -605,11 +665,14 @@ MAX_PREVIEW_FILES = 500
 
 @require_POST
 def preview(request):
-    """What a drop of read files would be read as, before a byte of it is uploaded.
+    """What a drop of read files, or a list of accessions, would be read as -- before a byte
+    of it is uploaded or downloaded.
 
-    Body: `{names: [...], arguments}`. Answers one row per sample the drop would produce: its
-    name, the files that make it, the coordinate the importer will read out of that name, and
-    the sample it would replace.
+    Body: `{names: [...], accessions, arguments}`. Answers one row per sample the drop would
+    produce: its name, the files that make it, the coordinate the importer will read out of
+    that name, and the sample it would replace. Rows for accessions carry what ENA said as
+    well -- the alias and title the name came from, the runs and their size -- so a person
+    can see that the accession is the one they meant before hours are spent on it.
 
     **This is why there is no JavaScript copy of the derivation.** The suite already carries
     one such copy -- `mutint_sample_names.js` -- and its own agreement test states the cost: it
@@ -631,6 +694,15 @@ def preview(request):
         return JsonResponse({"error": "You cannot see this experiment."}, status=403)
 
     payload = _payload(request)
+    typed_accessions = (payload.get("accessions") or "").strip()
+    if typed_accessions and not can_edit_experiment(request.user, experiment):
+        # Resolving talks to ENA. A reader may see what this experiment holds; making the
+        # installation ask another service on their behalf is a writer's privilege, the rule
+        # `upload_session.create_upload_session` states for NCBI.
+        return JsonResponse(
+            {"error": experiment_lock_refusal(experiment)
+                      or "You cannot add data to this experiment."}, status=403)
+
     names = payload.get("names") or []
     if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
         return JsonResponse({"error": "Expected a list of file names."}, status=400)
@@ -654,22 +726,111 @@ def preview(request):
     # named for files that will not exist by then.
     flat = [name.replace("/", "__").replace(os.sep, "__") for name in names]
 
+    try:
+        plans = _resolve_accessions(typed_accessions)
+    except (accessions.AccessionError, sra_fetch.FetchError) as refusal:
+        return JsonResponse({"error": str(refusal), "field": "accessions"}, status=400)
+
     existing = _existing_samples(experiment)
     rows = []
     for sample in read_names.derive_samples(sorted(flat), paired=paired):
-        identity = sample_names.parse_sample_identity(sample.name)
-        rows.append({
-            "name": sample.name,
-            "files": sample.files,
-            "population": identity.population if identity else "",
-            "time_point": ("" if identity is None
-                           else str(format_time_point(identity.time_point))),
-            "sample": (sample_names.sample_label(identity.name, identity.replicate)
-                       if identity else sample.name),
-            "placed": identity is not None,
-            "replaces": _replaced_label(existing, sample.name, identity),
-        })
+        rows.append(_preview_row(existing, sample))
+    for sample, plan_dicts in _accession_samples(plans):
+        row = _preview_row(existing, sample)
+        row.update(_accession_detail(plan_dicts))
+        rows.append(row)
     return JsonResponse({"samples": rows})
+
+
+def _preview_row(existing, sample):
+    from mutint_experiment.coordinates import format_time_point
+
+    identity = sample_names.parse_sample_identity(sample.name)
+    return {
+        "name": sample.name,
+        "files": sample.files,
+        "population": identity.population if identity else "",
+        "time_point": ("" if identity is None
+                       else str(format_time_point(identity.time_point))),
+        "sample": (sample_names.sample_label(identity.name, identity.replicate)
+                   if identity else sample.name),
+        "placed": identity is not None,
+        "replaces": _replaced_label(existing, sample.name, identity),
+    }
+
+
+# --- accessions -----------------------------------------------------------------------------
+
+def _resolve_accessions(text):
+    """`sra.Plan`s for what was typed in the accessions box; `[]` for nothing.
+
+    Core's parser and core's resolver, so the plugin holds no rule about what an accession
+    looks like and no knowledge of ENA. Raises `AccessionError` or `FetchError`, both of
+    which are a sentence naming the token at fault.
+    """
+    tokens = accessions.parse(text or "")
+    return sra_fetch.resolve(tokens) if tokens else []
+
+
+def _accession_samples(plans):
+    """`[(DerivedSample, [plan dict]), ...]`: one sample per accession, as a launch or a
+    preview would produce it.
+
+    Which runs are one sample is core's rule (`sra.samples_in`); what it is called is ENA's
+    alias when that alias could be a sample name *here* -- `SAMPLE_NAME_RE` is this plugin's
+    rule, passed in as the `usable` test -- and the accession otherwise. The plan dicts are
+    restricted to the sample's own runs, so a study's rows each download their own share.
+    The files are ENA's basenames, which are what the worker will find in `reads/` and what
+    the mate rule is then applied to.
+    """
+    samples = []
+    for sample in sra.samples_in(plans):
+        name = sra.sample_name_for(sample, usable=lambda n: bool(SAMPLE_NAME_RE.match(n)))
+        files = sorted(name for run in sample.runs for name in run.filenames)
+        plan_dicts = [sra.Plan(sample.typed, sample.kind, sample.runs).as_dict()]
+        samples.append((read_names.DerivedSample(name, files), plan_dicts))
+    return samples
+
+
+def _accession_detail(plan_dicts):
+    """What the preview says about an accession sample beyond its name and files."""
+    plans = sra.as_plans(plan_dicts)
+    first_run = plans[0].runs[0] if plans and plans[0].runs else None
+    return {
+        "accession": plans[0].typed if plans else "",
+        "kind": plans[0].kind if plans else "",
+        "alias": first_run.alias if first_run else "",
+        "title": first_run.title if first_run else "",
+        "biosample": first_run.sample_accession if first_run else "",
+        "runs": [{"accession": run.accession, "files": run.filenames, "bytes": run.bytes,
+                  "layout": run.layout}
+                 for plan in plans for run in plan.runs],
+        "bytes": sum(plan.total_bytes for plan in plans),
+    }
+
+
+def _name_clash(plan):
+    """A sentence if two samples of one launch share a name, else None.
+
+    Two dropped files cannot derive one name -- `derive_samples` merges them into one
+    sample -- but an accession's alias can equal a dropped file's derived name, or two
+    accessions can share an alias. Two rows with one name would supersede each other: the
+    second import replaces the first's calls, and the run list shows two runs for one sample
+    with no sign that one of them is gone.
+    """
+    seen = {}
+    for sample, plan_dicts in plan:
+        source = plan_dicts[0]["typed"] if plan_dicts else "the dropped files"
+        if sample.name in seen:
+            return ("%s would be the name of two samples in this launch, from %s and from "
+                    "%s. Give one of them a different name -- or launch them separately."
+                    % (sample.name, seen[sample.name], source))
+        seen[sample.name] = source
+    return None
+
+
+def _run_for(plans, filename):
+    return sra.filenames_by_run(plans).get(filename, "an accession")
 
 
 def _replaced_label(existing, name, identity):

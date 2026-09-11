@@ -4,5 +4,6 @@
 # mutint-breseq-specific additions (if any):
 #
 # None. The plugin shells out to breseq (see tools.txt) and stores what it needs in one
-# model; the run itself is `subprocess.run` and the ingest is mutint-core's own
+# model; the run itself is `mutint_jobs.processes.run_tool`, the SRA download is
+# `mutint_import.sra_fetch`, and the ingest is mutint-core's own
 # `mutint_import.breseq_folder`, so nothing here is new to the venv.
