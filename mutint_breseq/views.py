@@ -16,11 +16,12 @@ import tempfile
 
 from django.http import Http404, JsonResponse
 from django.shortcuts import render
+from django.urls import reverse
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST
 
 import mutint_sample.views.common
-from mutint_common import store
+from mutint_common import preferences, store
 from mutint_common.fileserve import serve_file
 from mutint_common.util import get_user_context
 from mutint_experiment.models import Experiment
@@ -35,7 +36,7 @@ from mutint_jobs import jobs as jobs_api
 from mutint_jobs import processes
 from mutint_import.upload_session import UploadError
 
-from mutint_breseq import runner, tasks
+from mutint_breseq import read_names, runner, tasks
 from mutint_breseq.models import (
     COMPONENT,
     STATUS_QUEUED,
@@ -49,10 +50,47 @@ logger = logging.getLogger("mutint_breseq.views")
 # string becomes a **directory name** under the store, and it is what
 # `mutint_import.sample_names.parse_sample_identity` reads the ALE, flask and isolate out of.
 # Both shapes that parser understands -- `3-30000-1-1` and `Ara-2_500gen_763A` -- fit inside
-# it, and nothing with a separator, a space or a leading dot does.
-SAMPLE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,99}$")
+# it, and nothing with a separator or a leading dot does.
+#
+# **A space is allowed**, matching `sample_names._NAME_PART`, which stopped forbidding one for
+# the reason recorded there: the parser, the columns and the sample editor never did. A space
+# in a directory name is harmless here because `runner.build_argv` produces a list and nothing
+# reaches a shell. A *trailing* space would not be harmless -- it is invisible and some
+# filesystems drop it -- so the name is stripped before it is matched, and the anchor refuses a
+# leading one.
+SAMPLE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+ -]{0,99}$")
 
 MAX_ARGUMENTS_CHARS = 2000
+
+#: How the form said what this sample is called. Three shapes of the same question, and the
+#: menu on the page is the only thing that decides between them.
+#:
+#: `MODE_PARTS` is the default because it is the contract every existing caller posts, and
+#: because a mode nobody named should be the one that composes rather than the one that trusts
+#: a string.
+MODE_NAME = "name"
+MODE_PARTS = "parts"
+MODE_READ_NAMES = "read_names"
+INPUT_MODES = (MODE_NAME, MODE_PARTS, MODE_READ_NAMES)
+
+
+#: Which way in this reader used last. One key rather than one per experiment: which half of
+#: the form somebody fills in is a habit, and a per-experiment key would start every new
+#: experiment remembering nothing. The same reasoning as `import.tab` in core.
+INPUT_MODE_PREFERENCE = "breseq.input_mode"
+
+
+def _embedded_preferences(user):
+    """This page's stored choices, for the script to read before its first draw.
+
+    Only for a signed-in reader -- an anonymous one gets localStorage from the client half of
+    the store, which is the arrangement `mutint_preferences.js` documents. Absent means "never
+    chosen", which the page turns into the default mode rather than into nothing.
+    """
+    if not user.is_authenticated:
+        return {}
+    stored = preferences.get_preference(user, INPUT_MODE_PREFERENCE)
+    return {} if stored is None else {INPUT_MODE_PREFERENCE: stored}
 
 
 def _experiment_or_none(request):
@@ -94,6 +132,19 @@ def breseq(request):
         "can_launch": can_edit_experiment(request.user, experiment),
         "lock_refusal": experiment_lock_refusal(experiment),
         "component": COMPONENT,
+        # Everything the page's script needs, in one `json_script` element. It used to
+        # interpolate `experiment_id` and `component` into an inline `<script>`; the script is
+        # a static file now and the template engine does not reach it.
+        "launch_config": {
+            "experiment_id": experiment.id,
+            "component": COMPONENT,
+            # The Input type menu is remembered per person through core's preference store,
+            # the way the Import data page remembers its tab. Embedded so the first draw is
+            # already the mode they last used rather than flicking to it after a fetch.
+            "authenticated": request.user.is_authenticated,
+            "preferences_url": reverse("preferences"),
+            "preferences": _embedded_preferences(request.user),
+        },
         "runs": _run_rows(experiment),
         # What the Population and Time point boxes offer. Put in the context rather than
         # fetched, which is what every other picker in the suite does -- and these change
@@ -241,6 +292,56 @@ PREFLIGHT_FASTQ = "@preflight\nACGTACGTAC\n+\nIIIIIIIIII\n"
 PREFLIGHT_TIMEOUT_SECONDS = 60
 
 
+def _check_name_is_usable(name, field):
+    """Raise SampleNameError unless `name` can be this sample's name and its directory.
+
+    The one check both single-sample modes share, and the only thing standing between a typed
+    string and a path under the store.
+    """
+    if not SAMPLE_NAME_RE.match(name):
+        if len(name) > 100:
+            raise sample_names.SampleNameError(
+                field,
+                "That name is too long: %d characters, and the limit is 100. It becomes a "
+                "directory name as well as this sample's name." % len(name))
+        raise sample_names.SampleNameError(
+            field,
+            "A sample name may use letters, digits, spaces, dot, underscore, plus and hyphen, "
+            "and must start with a letter or digit. It becomes a directory name as well as "
+            "this sample's name.")
+    return name
+
+
+def _single_sample_name(mode, payload):
+    """The one sample's name, from whichever half of the form was filled in.
+
+    **The two modes take different contracts, and that is the point of having modes.**
+
+    `MODE_PARTS` posts a population, a time point and a sample, and
+    `sample_names.compose_sample_name` decides how the three become one string -- so that
+    convention can change without this form changing with it, and the composer refuses the
+    combinations no name can spell while saying which field is at fault.
+
+    `MODE_NAME` posts the name itself and it is stored **verbatim**. Composing it would mean
+    rebuilding a name from the coordinate read out of it, which is not a round trip: `3-30000-1-1`
+    parses to population 3, time point 30000, label `1-1` and composes back to `3_30000_1-1`,
+    so a person who typed a perfectly good A-F-I-R name got a different one. A mode called
+    *metadata from a name* has to leave the name alone; the coordinate is read from it by the
+    importer exactly as it would be from a dropped folder of that name.
+    """
+    if mode == MODE_NAME:
+        name = (payload.get("sample_name") or "").strip()
+        if not name:
+            raise sample_names.SampleNameError("sample_name", "A sample name is required.")
+        return _check_name_is_usable(name, "sample_name")
+
+    name = sample_names.compose_sample_name(
+        payload.get("population"), payload.get("time_point"), payload.get("sample"))
+    # The composer keeps each part inside this pattern, so reaching here means the parts were
+    # individually fine and the whole is not -- a name past 100 characters.
+    return _check_name_is_usable(name, "sample")
+
+
 class CoverageLimitError(Exception):
     """The Limit coverage box did not hold a number this can be run with."""
 
@@ -359,24 +460,19 @@ def launch(request):
 
     payload = _payload(request)
 
-    # **The three parts, not a joined name.** How a population, a time point and a sample
-    # become one string is `sample_names.compose_sample_name`'s to decide -- the form sends
-    # what it knows and the convention can change without the form changing with it. That
-    # composer also refuses the combinations that cannot be a name, and says which field is
-    # at fault so the page can point at it.
-    try:
-        sample_name = sample_names.compose_sample_name(
-            payload.get("population"), payload.get("time_point"), payload.get("sample"))
-    except sample_names.SampleNameError as refusal:
-        return JsonResponse({"error": str(refusal), "field": refusal.field}, status=400)
-
-    if not SAMPLE_NAME_RE.match(sample_name):
-        # The composer keeps each part inside this pattern, so reaching here means the parts
-        # were individually fine and the whole is not -- a name past 100 characters.
+    mode = payload.get("input_mode") or MODE_PARTS
+    if mode not in INPUT_MODES:
+        # Named rather than fallen back from: a mode this does not know is a page and a server
+        # that disagree about what was asked for, and guessing "parts" would silently launch
+        # one sample for a drop somebody meant as ten.
         return JsonResponse(
-            {"error": "That name is too long: %d characters, and the limit is 100. It "
-                      "becomes a directory name as well as this sample's name."
-                      % len(sample_name), "field": "sample"}, status=400)
+            {"error": "Unknown input type %r." % mode, "field": "input_mode"}, status=400)
+
+    if mode != MODE_READ_NAMES:
+        try:
+            sample_name = _single_sample_name(mode, payload)
+        except sample_names.SampleNameError as refusal:
+            return JsonResponse({"error": str(refusal), "field": refusal.field}, status=400)
 
     arguments = (payload.get("arguments") or "").strip()
     if len(arguments) > MAX_ARGUMENTS_CHARS:
@@ -423,74 +519,212 @@ def launch(request):
     except UploadError as exc:
         return JsonResponse({"error": str(exc)}, status=409)
 
-    # Before the new row exists, so it cannot cancel itself. Anything already in flight for
-    # this sample is about to have its output overwritten -- see `_supersede_in_flight`.
-    superseded = _supersede_in_flight(experiment, sample_name, request.user)
-
-    run = BreseqRun.objects.create(
-        experiment=experiment,
-        created_by=request.user if request.user.is_authenticated else None,
-        sample_name=sample_name,
-        arguments=arguments,
-        trim_reads=bool(payload.get("trim_reads", True)),
-        population_sample=population_sample,
-        coverage_limit=coverage_limit,
-        status=STATUS_QUEUED)
-
-    try:
-        reads = _take_reads(staged_root, run)
-    except Exception as exc:
-        logger.exception("could not stage reads for breseq run %s", run.pk)
+    staged = _staged_files(staged_root)
+    if not staged:
         staging.abandon(session)
-        run.delete()
+        return JsonResponse({"error": "No read files were uploaded."}, status=400)
+
+    if mode == MODE_READ_NAMES:
+        paired = "--no-paired-mapping" not in runner.split_arguments(arguments)
+        plan = read_names.derive_samples(sorted(staged), paired=paired)
+        for sample in plan:
+            try:
+                _check_name_is_usable(sample.name, "upload")
+            except sample_names.SampleNameError as refusal:
+                staging.abandon(session)
+                return JsonResponse(
+                    {"error": "%s could not be a sample name: %s" % (sample.name, refusal),
+                     "field": "upload"}, status=400)
+    else:
+        plan = [read_names.DerivedSample(sample_name, sorted(staged))]
+
+    # **Every name superseded before any row exists.** Called inside the loop below, run two's
+    # supersede would cancel run one from this same launch -- it matches on the sample name and
+    # knows nothing about which launch a row came from.
+    superseded = sum(_supersede_in_flight(experiment, sample.name, request.user)
+                     for sample in plan)
+
+    runs = []
+    try:
+        for sample in plan:
+            run = BreseqRun.objects.create(
+                experiment=experiment,
+                created_by=request.user if request.user.is_authenticated else None,
+                sample_name=sample.name,
+                arguments=arguments,
+                trim_reads=bool(payload.get("trim_reads", True)),
+                population_sample=population_sample,
+                coverage_limit=coverage_limit,
+                status=STATUS_QUEUED)
+            runs.append(run)
+            run.read_files = _take_reads(staged, run, sample.files)
+            run.save(update_fields=["read_files"])
+    except Exception as exc:
+        # **All of them, not the one that failed.** Each row owns its own directory and its
+        # post_delete receiver takes the files with it, so unwinding the whole launch leaves
+        # nothing behind -- and a half-launched drop is worse than none, because the samples
+        # that did start would have to be found and cancelled by hand.
+        logger.exception("could not stage reads for a breseq launch in experiment %s",
+                         experiment.id)
+        for run in runs:
+            run.delete()
+        staging.abandon(session)
         return JsonResponse({"error": "The uploaded reads could not be stored: %s" % exc},
                             status=500)
 
-    if not reads:
-        staging.abandon(session)
-        run.delete()
-        return JsonResponse({"error": "No read files were uploaded."}, status=400)
-
-    run.read_files = reads
-    run.save(update_fields=["read_files"])
-    # The staged copy is gone by here; the reads live under the run's own directory, which the
-    # run's post_delete receiver owns. Nothing is left for core's reaper to be racing.
+    # The staged copy is gone by here; the reads live under each run's own directory, which
+    # that run's post_delete receiver owns. Nothing is left for core's reaper to be racing.
     staging.close(session)
 
-    # Through mutint_jobs rather than `task.enqueue` directly, which is what puts the run on
-    # /jobs/ with a name and an owner and makes it stoppable. `cancellable=True` is a promise
-    # the task keeps -- see mutint_jobs.processes.run_tool, which polls while the tool runs.
-    job = jobs_api.enqueue(
-        tasks.run_breseq, run.pk,
-        user=request.user,
-        label="breseq \u2014 %s" % run.sample_name,
-        component=COMPONENT,
-        experiment=experiment,
-        cancellable=True)
-    run.task_result_id = job.task_result_id
-    run.save(update_fields=["task_result_id"])
+    for run in runs:
+        # Through mutint_jobs rather than `task.enqueue` directly, which is what puts the run on
+        # /jobs/ with a name and an owner and makes it stoppable. `cancellable=True` is a promise
+        # the task keeps -- see mutint_jobs.processes.run_tool, which polls while the tool runs.
+        job = jobs_api.enqueue(
+            tasks.run_breseq, run.pk,
+            user=request.user,
+            label="breseq \u2014 %s" % run.sample_name,
+            component=COMPONENT,
+            experiment=experiment,
+            cancellable=True)
+        run.task_result_id = job.task_result_id
+        run.save(update_fields=["task_result_id"])
 
-    return JsonResponse({"run_id": run.pk, "superseded": superseded,
+    return JsonResponse({"run_ids": [run.pk for run in runs], "superseded": superseded,
                          "runs": _run_rows(experiment)})
 
 
-def _take_reads(staged_root, run):
-    """Move every staged file into the run's own reads directory. Returns their basenames.
+#: A drop bigger than this is not previewed row by row. Nothing breaks past it -- the launch
+#: itself is unbounded -- but a table of a thousand rows is not something anybody reads, and
+#: the request that builds it is on the page's critical path.
+MAX_PREVIEW_FILES = 500
+
+
+@require_POST
+def preview(request):
+    """What a drop of read files would be read as, before a byte of it is uploaded.
+
+    Body: `{names: [...], arguments}`. Answers one row per sample the drop would produce: its
+    name, the files that make it, the coordinate the importer will read out of that name, and
+    the sample it would replace.
+
+    **This is why there is no JavaScript copy of the derivation.** The suite already carries
+    one such copy -- `mutint_sample_names.js` -- and its own agreement test states the cost: it
+    can check that the two *specifications* match and never that the JS implementation matches
+    its own table. That copy earns its place because a name box needs an answer per keystroke.
+    A file drop is a discrete event, so it can afford a round trip, and one derivation with two
+    callers cannot drift from itself.
+
+    No session, no upload, no state: names in, rows out. It is gated all the same, because the
+    reply names the experiment's existing samples.
+    """
+    if not request.user.is_authenticated:
+        return JsonResponse({"error": "You must be signed in."}, status=403)
+
+    experiment = _experiment_or_none(request)
+    if experiment is None:
+        return JsonResponse({"error": "Unknown experiment."}, status=404)
+    if not can_view_project(request.user, experiment.project):
+        return JsonResponse({"error": "You cannot see this experiment."}, status=403)
+
+    payload = _payload(request)
+    names = payload.get("names") or []
+    if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
+        return JsonResponse({"error": "Expected a list of file names."}, status=400)
+    if len(names) > MAX_PREVIEW_FILES:
+        return JsonResponse(
+            {"error": "That is %d files; the preview stops at %d."
+                      % (len(names), MAX_PREVIEW_FILES)}, status=400)
+
+    try:
+        typed = runner.split_arguments(payload.get("arguments") or "")
+    except ValueError:
+        # The arguments box is refused properly at launch; here an unreadable one only means
+        # the pairing rule cannot be told which way to group, so it takes the default.
+        typed = []
+    paired = "--no-paired-mapping" not in typed
+
+    from mutint_experiment.coordinates import format_time_point
+
+    # The names the *worker* will see, which is what the derivation runs over. A drop with
+    # folders in it flattens, and a preview over the unflattened names would promise samples
+    # named for files that will not exist by then.
+    flat = [name.replace("/", "__").replace(os.sep, "__") for name in names]
+
+    existing = _existing_samples(experiment)
+    rows = []
+    for sample in read_names.derive_samples(sorted(flat), paired=paired):
+        identity = sample_names.parse_sample_identity(sample.name)
+        rows.append({
+            "name": sample.name,
+            "files": sample.files,
+            "population": identity.population if identity else "",
+            "time_point": ("" if identity is None
+                           else str(format_time_point(identity.time_point))),
+            "sample": (sample_names.sample_label(identity.name, identity.replicate)
+                       if identity else sample.name),
+            "placed": identity is not None,
+            "replaces": _replaced_label(existing, sample.name, identity),
+        })
+    return JsonResponse({"samples": rows})
+
+
+def _replaced_label(existing, name, identity):
+    """The label of the sample this one would supersede, or "".
+
+    Both keys, because the importer uses both: a placed name matches on the coordinate, and a
+    name carrying none matches on `source_name`. The same rule `_existing_samples` documents.
+    """
+    from mutint_experiment.coordinates import format_time_point
+
+    for row in existing:
+        if identity is not None:
+            if (row["population"] == identity.population
+                    and row["time_point"] == str(format_time_point(identity.time_point))
+                    and row["sample"] == sample_names.sample_label(
+                        identity.name, identity.replicate)):
+                return row["label"]
+        elif row["source_name"] == name:
+            return row["label"]
+    return ""
+
+
+def _flat_name(staged_root, path):
+    """The name a staged file takes once it is under a run's flat `reads/` directory.
 
     Flattened deliberately: a drop may arrive with directory structure (a run folder from a
     sequencing core), and breseq takes read files positionally with no notion of where they
     sat. Basenames are made unique by the directories they came from, so two lanes' `R1.fastq`
     do not collide.
+
+    **One definition, three callers** -- taking the reads, deriving the samples, and the
+    preview the page draws. The derivation runs over these names, so a second spelling here
+    would make the preview promise names the run would not produce.
     """
-    reads_dir = store.ensure_dir(run.reads_dir())
-    names = []
+    return os.path.relpath(path, staged_root).replace(os.sep, "__")
+
+
+def _staged_files(staged_root):
+    """`{flat name: source path}` for everything in the drop."""
+    found = {}
     for dirpath, _dirnames, filenames in os.walk(staged_root):
         for filename in sorted(filenames):
             source = os.path.join(dirpath, filename)
-            relative = os.path.relpath(source, staged_root)
-            flat = relative.replace(os.sep, "__")
-            shutil.move(source, os.path.join(reads_dir, flat))
-            names.append(flat)
+            found[_flat_name(staged_root, source)] = source
+    return found
+
+
+def _take_reads(staged, run, names):
+    """Move this run's share of the drop into its own reads directory. Returns the names.
+
+    **Its share, not all of it** -- one launch can produce several runs, and each owns a
+    directory of its own because `BreseqRun`'s post_delete receiver rmtrees the whole thing.
+    The shares are disjoint, so the files are moved rather than copied and nothing is stored
+    twice.
+    """
+    reads_dir = store.ensure_dir(run.reads_dir())
+    for name in names:
+        shutil.move(staged[name], os.path.join(reads_dir, name))
     return sorted(names)
 
 

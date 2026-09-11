@@ -85,7 +85,8 @@ class RunTestCase(TestCase):
 
     def _launch(self, sample="s1", population="", time_point="", arguments="",
                 names=("s1_R1.fastq", "s1_R2.fastq"), trim_reads=None, content="ACGT",
-                population_sample=None, coverage_limit=None):
+                population_sample=None, coverage_limit=None, input_mode=None,
+                sample_name=None):
         """The endpoint takes the three parts of a coordinate, not a joined name: the server
         composes. `sample` alone is the unplaced case, which is what most of these want."""
         session = self._stage(names, content=content)
@@ -98,6 +99,10 @@ class RunTestCase(TestCase):
             body["population_sample"] = population_sample
         if coverage_limit is not None:
             body["coverage_limit"] = coverage_limit
+        if input_mode is not None:
+            body["input_mode"] = input_mode
+        if sample_name is not None:
+            body["sample_name"] = sample_name
         return self.client.post(
             "/breseq/launch?experiment_id=%s" % self.experiment.id,
             data=json.dumps(body), content_type="application/json")
@@ -254,7 +259,7 @@ class RunTestCase(TestCase):
         response = self._launch()
         self.assertEqual(response.status_code, 200)
 
-        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        run = BreseqRun.objects.get(pk=response.json()["run_ids"][0])
         self.assertEqual(run.status, STATUS_IMPORTED, run.error)
         self.assertIsNotNone(run.sample, "the imported sample was not linked to the run")
         self.assertEqual(run.sample.source_name, "s1")
@@ -278,6 +283,59 @@ class RunTestCase(TestCase):
         self.assertEqual(run.sample.population.name, "Ara-2")
         self.assertEqual(run.sample.time_point, 500)
 
+    def test_a_name_posted_whole_is_kept_exactly_as_typed(self):
+        """The whole of what `input_mode="name"` buys.
+
+        Composing would rebuild the name from the coordinate read out of it, and that is not a
+        round trip: `3-30000-1-1` parses to population 3, time point 30000, label `1-1`, which
+        composes back to `3_30000_1-1`. A mode called *metadata from a name* has to leave the
+        name alone -- and the coordinate still lands, because the importer parses the name.
+        """
+        self._launch(input_mode="name", sample_name="3-30000-1-1")
+        run = BreseqRun.objects.get()
+
+        self.assertEqual(run.sample_name, "3-30000-1-1")
+        self.assertEqual(run.sample.source_name, "3-30000-1-1")
+        self.assertEqual(run.sample.population.name, "3")
+        self.assertEqual(run.sample.time_point, 30000)
+        self.assertEqual(run.sample.name, "1-1")
+
+    def test_a_name_is_stripped_before_it_becomes_a_directory(self):
+        # Surrounding whitespace is invisible in the box and some filesystems drop it, so the
+        # two would disagree about what the directory is called.
+        self._launch(input_mode="name", sample_name="  s1  ")
+        self.assertEqual(BreseqRun.objects.get().sample_name, "s1")
+
+    def test_the_parts_mode_still_composes(self):
+        response = self._launch(input_mode="parts", population="Ara-2", time_point="500",
+                                sample="763A")
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(BreseqRun.objects.get().sample_name, "Ara-2_500_763A")
+
+    def test_an_unknown_input_mode_is_refused_rather_than_guessed(self):
+        # Guessing `parts` would launch one sample for a drop somebody meant as ten.
+        response = self._launch(input_mode="whatever")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["field"], "input_mode")
+        self.assertEqual(BreseqRun.objects.count(), 0)
+
+    def test_a_space_in_a_part_survives_to_the_sample(self):
+        """A space used to be refused, and nothing else in the suite agreed with that rule.
+
+        The sample editor already accepts `Ara 2`, `Population.name` is a plain CharField and
+        the parser has no character rule -- so the launcher was the only thing that could not
+        spell a coordinate the rest of the product could hold. Asserted end to end because the
+        name is also a **directory** name here: it has to survive breseq's `-o` and come back
+        out of `find_sample_dirs` as the coordinate it went in as.
+        """
+        self._launch(population="Ara 2", time_point="500", sample="763 A")
+        run = BreseqRun.objects.get()
+
+        self.assertEqual(run.status, STATUS_IMPORTED, run.error)
+        self.assertEqual(run.sample.source_name, "Ara 2_500_763 A")
+        self.assertEqual(run.sample.population.name, "Ara 2")
+        self.assertEqual(run.sample.name, "763 A")
+
     def test_a_sample_with_no_coordinate_is_filed_under_unspecified(self):
         """Leaving the population and time point empty is the unplaced case, and it says so
         rather than inventing population 1 at time point 1."""
@@ -300,7 +358,7 @@ class RunTestCase(TestCase):
 
     def test_a_pair_is_trimmed_together_and_breseq_reads_the_trimmed_copies(self):
         response = self._launch(names=("s1_R1.fastq", "s1_R2.fastq"))
-        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        run = BreseqRun.objects.get(pk=response.json()["run_ids"][0])
         self.assertTrue(run.trim_reads)
 
         calls = self._recorded_fastp()
@@ -349,7 +407,7 @@ class RunTestCase(TestCase):
 
     def test_trimming_can_be_switched_off(self):
         response = self._launch(trim_reads=False)
-        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        run = BreseqRun.objects.get(pk=response.json()["run_ids"][0])
         self.assertFalse(run.trim_reads)
         self.assertEqual([], self._recorded_fastp())
         breseq = self._recorded_argv()["argv"]
@@ -361,7 +419,7 @@ class RunTestCase(TestCase):
         # flag that says "nanopore" -- breseq detects it by length too.
         long_read = "@r\n%s\n+\n%s\n" % ("A" * 1200, "I" * 1200)
         response = self._launch(names=("ont.fastq",), content=long_read)
-        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        run = BreseqRun.objects.get(pk=response.json()["run_ids"][0])
         self.assertEqual([], self._recorded_fastp())
         self.assertEqual(run.reads_dir(), os.path.dirname(self._recorded_argv()["argv"][-1]))
         self.assertIn("left ont.fastq untrimmed", run.log)
@@ -401,7 +459,7 @@ class RunTestCase(TestCase):
 
     def test_the_trimmed_copies_go_with_the_rest_after_import(self):
         response = self._launch()
-        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        run = BreseqRun.objects.get(pk=response.json()["run_ids"][0])
         self.assertEqual(run.status, STATUS_IMPORTED, run.error)
         self.assertFalse(os.path.exists(run.trimmed_dir()), "the trimmed reads were kept")
 
@@ -428,7 +486,7 @@ class RunTestCase(TestCase):
     def test_a_population_sample_is_imported_as_one(self):
         response = self._launch(population_sample=True)
 
-        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        run = BreseqRun.objects.get(pk=response.json()["run_ids"][0])
         self.assertEqual(run.status, STATUS_IMPORTED, run.error)
         self.assertTrue(run.population_sample)
         self.assertFalse(Sample.objects.get(pk=run.sample_id).is_clonal)
@@ -436,7 +494,7 @@ class RunTestCase(TestCase):
     def test_a_sample_is_clonal_unless_the_box_is_ticked(self):
         response = self._launch()
 
-        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        run = BreseqRun.objects.get(pk=response.json()["run_ids"][0])
         self.assertFalse(run.population_sample)
         self.assertTrue(Sample.objects.get(pk=run.sample_id).is_clonal)
 
@@ -448,7 +506,7 @@ class RunTestCase(TestCase):
         breseq with better options, superseding the sample, is what this page is for.
         """
         first = self._launch()
-        sample_id = BreseqRun.objects.get(pk=first.json()["run_id"]).sample_id
+        sample_id = BreseqRun.objects.get(pk=first.json()["run_ids"][0]).sample_id
         self.assertTrue(Sample.objects.get(pk=sample_id).is_clonal)
 
         self._launch(population_sample=True)
@@ -463,6 +521,115 @@ class RunTestCase(TestCase):
         rows = self.client.get("/breseq/runs?experiment_id=%s" % self.experiment.id).json()
         self.assertTrue(rows["runs"][0]["population_sample"])
 
+    # --- one drop, several samples ----------------------------------------------------------
+
+    def test_a_drop_of_two_samples_makes_two_runs(self):
+        """`input_mode="read_names"` is the only mode that can make more than one row.
+
+        One run per sample, each with its own directory, its own breseq call and its own job --
+        every invariant a single run has, kept. Nothing is shared, because `BreseqRun`'s
+        post_delete receiver rmtrees its whole directory and two rows sharing one would destroy
+        each other's reads.
+        """
+        response = self._launch(
+            input_mode="read_names",
+            names=("Ara-2_500gen_763A_R1.fastq", "Ara-2_500gen_763A_R2.fastq",
+                   "Ara-2_500gen_764B_R1.fastq", "Ara-2_500gen_764B_R2.fastq"))
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(len(response.json()["run_ids"]), 2)
+
+        runs = {run.sample_name: run for run in BreseqRun.objects.all()}
+        self.assertEqual(sorted(runs), ["Ara-2_500gen_763A", "Ara-2_500gen_764B"])
+        for name, run in runs.items():
+            self.assertEqual(run.status, STATUS_IMPORTED, run.error)
+            self.assertEqual(run.read_files, [name + "_R1.fastq", name + "_R2.fastq"])
+            self.assertEqual(run.sample.source_name, name)
+            self.assertNotEqual(run.directory(), None)
+
+        # Two samples, both placed by their names, sharing the population the names name.
+        self.assertEqual(
+            Sample.objects.filter(population__experiment=self.experiment).count(), 2)
+
+    def test_each_run_gets_only_its_own_reads(self):
+        """The shares are disjoint, so the files are moved rather than copied."""
+        self._launch(input_mode="read_names",
+                     names=("a_500gen_1_R1.fastq", "b_500gen_1_R1.fastq"))
+
+        for call in self._recorded_breseq():
+            if call["dry_run"]:
+                continue
+            reads = [arg for arg in call["argv"] if arg.endswith(".fastq")]
+            self.assertEqual(len(reads), 1, "a run was given another sample's reads")
+
+    def test_read_name_mode_ignores_the_name_boxes(self):
+        # They are disabled in that mode, so anything they still hold is stale.
+        self._launch(input_mode="read_names", sample="ignored", population="ignored",
+                     names=("Ara-2_500gen_763A_R1.fastq",))
+        self.assertEqual(BreseqRun.objects.get().sample_name, "Ara-2_500gen_763A")
+
+    def test_an_empty_drop_is_refused_before_any_row_exists(self):
+        session = staging.open_session(
+            self.owner, self.experiment, "mutint_breseq", [{"path": "r.fastq", "size": 4}])
+        store.ensure_dir(store.staging_dir(session.id))
+
+        response = self.client.post(
+            "/breseq/launch?experiment_id=%s" % self.experiment.id,
+            data=json.dumps({"upload_id": str(session.id), "input_mode": "read_names"}),
+            content_type="application/json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(BreseqRun.objects.count(), 0)
+
+    # --- the preview ------------------------------------------------------------------------
+
+    def _preview(self, names, arguments=""):
+        return self.client.post(
+            "/breseq/preview?experiment_id=%s" % self.experiment.id,
+            data=json.dumps({"names": list(names), "arguments": arguments}),
+            content_type="application/json").json()
+
+    def test_the_preview_names_the_samples_a_drop_would_make(self):
+        body = self._preview(["Ara-2_500gen_763A_R1.fastq.gz",
+                              "Ara-2_500gen_763A_R2.fastq.gz",
+                              "S12_L001_R1_001.fastq.gz", "S12_L001_R2_001.fastq.gz"])
+
+        self.assertEqual([row["name"] for row in body["samples"]],
+                         ["Ara-2_500gen_763A", "S12"])
+        placed, unplaced = body["samples"]
+        self.assertTrue(placed["placed"])
+        self.assertEqual((placed["population"], placed["time_point"], placed["sample"]),
+                         ("Ara-2", "500", "763A"))
+        # The honest answer for bcl2fastq output: the name carries nothing.
+        self.assertFalse(unplaced["placed"])
+        self.assertEqual(len(unplaced["files"]), 2)
+
+    def test_the_preview_and_the_launch_agree(self):
+        """The whole reason the preview is a round trip rather than a copy of the rule in JS.
+
+        Whatever the preview promised is what the launch has to produce -- so this asserts the
+        two against each other rather than each against a literal.
+        """
+        names = ["run/L1/x_500gen_1_R1.fastq", "run/L1/x_500gen_1_R2.fastq",
+                 "run/L2/y_500gen_1_R1.fastq"]
+        promised = [row["name"] for row in self._preview(names)["samples"]]
+
+        self._launch(input_mode="read_names", names=tuple(names))
+
+        self.assertEqual(sorted(promised),
+                         sorted(BreseqRun.objects.values_list("sample_name", flat=True)))
+
+    def test_the_preview_says_what_a_drop_would_replace(self):
+        self._launch(population="Ara-2", time_point="500", sample="763A")
+
+        body = self._preview(["Ara-2_500gen_763A_R1.fastq", "Ara-2_500gen_763A_R2.fastq"])
+
+        self.assertTrue(body["samples"][0]["replaces"])
+
+    def test_the_preview_uploads_nothing_and_leaves_no_rows(self):
+        self._preview(["a_R1.fastq"])
+        self.assertEqual(BreseqRun.objects.count(), 0)
+
     # --- limiting coverage ------------------------------------------------------------------
 
     def test_a_coverage_limit_reaches_both_breseq_calls(self):
@@ -475,7 +642,7 @@ class RunTestCase(TestCase):
     def test_a_blank_coverage_limit_means_every_read(self):
         response = self._launch(coverage_limit="")
 
-        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        run = BreseqRun.objects.get(pk=response.json()["run_ids"][0])
         self.assertIsNone(run.coverage_limit)
         self.assertNotIn("-l", self._recorded_argv()["argv"])
 
@@ -498,7 +665,7 @@ class RunTestCase(TestCase):
         so nothing is left here -- and the report outlives this row, which is the point.
         """
         response = self._launch()
-        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        run = BreseqRun.objects.get(pk=response.json()["run_ids"][0])
 
         self.assertFalse(os.path.exists(run.reads_dir()), "the reads were kept")
         self.assertFalse(os.path.exists(run.output_dir()), "breseq's output was kept")
@@ -510,7 +677,7 @@ class RunTestCase(TestCase):
 
     def test_the_staging_area_is_released(self):
         response = self._launch()
-        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        run = BreseqRun.objects.get(pk=response.json()["run_ids"][0])
         self.assertEqual(run.read_files, ["s1_R1.fastq", "s1_R2.fastq"])
         self.assertFalse(
             os.path.exists(os.path.join(self.store, "staging")) and
@@ -536,7 +703,7 @@ class RunTestCase(TestCase):
         `mutint_sample/tests/test_report.py`.
         """
         response = self._launch()
-        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        run = BreseqRun.objects.get(pk=response.json()["run_ids"][0])
 
         rows = self.client.get("/breseq/runs?experiment_id=%s" % self.experiment.id).json()
         row = [r for r in rows["runs"] if r["id"] == run.pk][0]
@@ -544,7 +711,7 @@ class RunTestCase(TestCase):
 
     def test_the_old_plugin_route_is_gone(self):
         response = self._launch()
-        run = BreseqRun.objects.get(pk=response.json()["run_id"])
+        run = BreseqRun.objects.get(pk=response.json()["run_ids"][0])
         self.assertEqual(
             404, self.client.get("/breseq/run/%d/report/index.html" % run.pk).status_code)
 

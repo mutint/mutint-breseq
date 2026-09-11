@@ -32,33 +32,100 @@ breseq, and every run fails identically.
 ## Launching a run
 
 1. Open the experiment's **Import data** page and choose the **Run breseq** tab.
-2. Type a **sample name**. This is what the sample is called everywhere in MutInt.
-3. Tick **Population sample** if these reads are a whole population rather than a clone.
-4. Optionally tick **Limit coverage to** and name a fold coverage. Left unticked, every read
-   is used; 60&ndash;80 is recommended for clonal samples.
-5. Optionally type **breseq arguments**, and untick **Trim reads with fastp first** if you do
+2. Choose an **Input type** and name the sample &mdash; see *Three ways to name a sample* below.
+3. Select **Population sample** if these reads are a whole population rather than a clone.
+4. Optionally select **Limit read-depth coverage** and name a fold coverage. Left deselected,
+   every read is used; 60&ndash;80 is recommended for clonal samples.
+5. Optionally type **breseq arguments**, and deselect **Trim reads with fastp first** if you do
    not want the reads trimmed.
 6. Drop the sample's read files, and press **Run breseq**.
 
 Everything you drop is one sample's reads — both mates of a pair, or several lanes. To analyze
 a second sample, launch again.
 
-### The sample name is worth thinking about
+## Three ways to name a sample
 
-Two shapes place the sample on its ALE and time point automatically:
+The **Input type** menu at the top of the form decides how the samples in a drop are named,
+and shows only the boxes that way needs.
 
-| name | ALE | time point | isolate |
+### Single sample with metadata from a name
+
+Type the name in **Full Name**. The three boxes below it show how it will be read — which
+population, which time point, which sample — and cannot be typed into; switch to the next
+input type to set them yourself.
+
+**The name is stored exactly as you type it.** It is also the name of the directory breseq
+writes into, so it may use letters, digits, spaces, dot, underscore, plus and hyphen, and must
+start with a letter or a digit.
+
+### Single sample with specified population, time point
+
+Fill in **Population**, **Time point** and **Sample**, and the name is built from them —
+joined with underscores, and shown in the Full Name box, which is read-only in this mode.
+Population and Time point offer the values this experiment already uses and take a new one
+just as readily.
+
+Leave Population and Time point empty and the sample is filed under **Unspecified** with no
+time point. A name carries a population and a time point together or neither: there is no way
+to write one without the other.
+
+### One or more samples with metadata from read names
+
+No name boxes at all: **each read file, or each pair of mates, is one sample**, named after the
+file. Drop twenty files and launch ten samples in one go — each becomes a run of its own, with
+its own entry on the Jobs page and its own Cancel.
+
+What is removed from a filename to leave the sample's name is the extension, the read number
+(`_R1`, `_R2`, or a bare `_1`/`_2` when the mate is in the drop too), the lane (`_L001`) and
+bcl2fastq's trailing chunk index (`_001`). Everything else is the name.
+
+| dropped | sample | placed as |
+|---|---|---|
+| `Ara-2_500gen_763A_R1.fastq.gz`, `..._R2...` | `Ara-2_500gen_763A` | Ara-2, time point 500, sample 763A |
+| `pop3_day7_clone2_R1.fq.gz`, `..._R2...` | `pop3_day7_clone2` | pop3, time point 7, sample clone2 |
+| `3-30000-1-1_R1.fastq.gz`, `..._R2...` | `3-30000-1-1` | 3, time point 30000, sample 1-1 |
+| `lane_1.fq`, `lane_2.fq` | `lane` | Unspecified, no time point |
+| `S12_L001_R1_001.fastq.gz` and three more | `S12` | Unspecified, no time point |
+
+That last row is worth reading twice. Illumina's own filenames carry a sample-sheet index and
+nothing else, so there is no population and no time point to find — the sample lands under
+**Unspecified**, which is fine for a one-off and worth correcting on the sample's edit page for
+a series. All four of its files are one sample: two lanes of one library are one sample, not
+two.
+
+**The table under the drop zone says what will happen before anything is uploaded** — one row
+per sample, the files that make it, where it will be placed, and whether it replaces a sample
+the experiment already holds. Read it. If a name is not being split the way you expected,
+renaming the files is quicker than correcting the samples afterwards.
+
+**The Population sample checkbox applies to every sample in the drop.** Read names say nothing
+about clonality — a drop that mixes clones and populations is two launches.
+
+### What a name places, and what it does not
+
+Whichever input type you use, the same two shapes place a sample on its population and time
+point automatically:
+
+| name | population | time point | sample |
 |---|---|---|---|
-| `3-30000-1-1` | 3 | 30000 | 1 |
+| `3-30000-1-1` | 3 | 30000 | 1-1 |
 | `Ara-2_500gen_763A` | Ara-2 | 500 | 763A |
 
-Anything else is auto-numbered onto ALE 1, time point 1 — which is fine for a one-off, and is
-worth avoiding for a series, because analyses that read along an ALE need a time axis to read
-along. **Fixed Mutations in particular can find nothing** in an experiment whose samples all
-sit at one time point: a mutation is fixed if it is in the last two, and there is no "last
+The first is four whole numbers separated by hyphens. The second is three fields separated by
+underscores, where the middle one is a number — and it may wear its unit on either side, so
+`500gen`, `day7`, `t12` and `h24` are all read as numbers, with the unit discarded. A time
+point is one unit-less number, so an experiment that mixes days and generations has two time
+axes and no way to say so.
+
+Anything else is filed under **Unspecified** with no time point. That is fine for a one-off and
+worth avoiding for a series, because analyses that read along a population need a time axis to
+read along. **Fixed Mutations in particular can find nothing** in an experiment whose samples
+all sit at one time point: a mutation is fixed if it is in the last two, and there is no "last
 two" of one. You can correct it afterwards on the sample's edit page.
 
-Letters, digits, dot, underscore, plus and hyphen; it must start with a letter or digit.
+Letters, digits, spaces, dot, underscore, plus and hyphen; it must start with a letter or
+digit. **Spaces are allowed** in a population or sample name — `Ara 2` is a name the rest of
+MutInt has always accepted, and the launcher no longer refuses it.
 
 ### Clone or population
 
@@ -67,30 +134,30 @@ because it is the one that changes what the numbers mean. A clone is one genotyp
 population is a whole evolving culture sequenced together, so its mutations carry frequencies
 rather than being simply present.
 
-Ticking it does two things. breseq is run with `-p`, its polymorphism mode, so it predicts
+Selecting it does two things. breseq is run with `-p`, its polymorphism mode, so it predicts
 mixed mutations as well as consensus ones. And the sample that lands is **recorded as a
 population**, which is what puts a frequency column on its mutation table and what the
 Clonal / Mixed filter on Compare selects by. You can change it afterwards on the sample's edit
 page, where it is called **Mixed**.
 
-Leave it unticked for a clone, which is the default.
+Leave it deselected for a clone, which is the default.
 
 You can also just type `-p` yourself, and that goes on working: breseq runs the same way, and
 the sample is recorded as a population as long as it is new. Two things the checkbox does that
 typing the flag does not: it also covers **re-running over a sample that already exists** --
 correcting a clone's analysis to a population's -- and it works with either spelling of the
-flag. If you tick the box and type the flag as well, what you typed is left exactly as it is
+flag. If you select the box and type the flag as well, what you typed is left exactly as it is
 and nothing is repeated.
 
 ### Limiting coverage
 
 A deep run wastes time: past a point, more reads make the analysis slower without finding
-anything more. **Limit coverage to** tells breseq to use only enough reads to reach the fold
-coverage you name, and to ignore the rest.
+anything more. **Limit read-depth coverage** tells breseq to use only enough reads to reach the
+fold coverage you name, and to ignore the rest.
 
-**The tick box is what decides whether coverage is limited at all.** Left unticked — which is
-how the page starts — every read is used, which is breseq's own default and is always safe.
-Ticking it enables the number beside it and fills in 80, which you can change.
+**The check box is what decides whether coverage is limited at all.** Left deselected — which
+is how the page starts — every read is used, which is breseq's own default and is always safe.
+Selecting it enables the number beside it and fills in 80, which you can change.
 
 **60&ndash;80 is the recommendation for clonal samples**, and it is usually a large speed-up
 with no loss of sensitivity. The actual coverage achieved comes out somewhat lower, because
@@ -133,19 +200,9 @@ says so. Files that are not FASTQ by name, such as aligned SAM under `--aligned-
 through as well. Compression is untouched: a gzipped file comes out gzipped.
 
 If fastp fails the run fails, with fastp's output in the log, rather than quietly running breseq
-on the untrimmed reads. Untick the box to skip trimming altogether.
+on the untrimmed reads. Deselect the box to skip trimming altogether.
 
-## Naming the sample
-
-Four boxes, and they are one thing seen two ways. **Full Name** is what the sample is called
-everywhere in MutInt; **Population**, **Time point** and **Sample** are the parts of it. Type a
-name and it is split into the three; fill the three and the name is built. Population and Time
-point offer the values this experiment already uses, and take a new one just as readily.
-
-Leave Population and Time point empty and the sample is filed under **Unspecified** with no
-time point — fine for a one-off, and worth avoiding for a series you will want to plot against
-time. A name carries a population and a time point together or neither: there is no way to
-write one without the other.
+## Re-running a sample you already have
 
 If the coordinate matches a sample already in the experiment, the page says so before you
 launch. That is a warning and not a refusal: importing a sample that already exists **replaces
@@ -223,7 +280,8 @@ remove the data. Delete the sample itself from the mutation editor if that is wh
 
 ## What it does not do
 
-- **It does not analyze several samples at once.** One launch is one sample; launch again for
-  the next. Several launches queue and run in order.
+- **It does not name several samples for you by hand.** Two of the three input types are one
+  sample per launch; the third takes as many as the drop holds, but only because the read
+  names carry the names. There is no table of boxes to fill in.
 - **It does not choose the reference.** Every run uses the experiment's own, which is what
   makes the resulting samples comparable with everything else in it.

@@ -146,7 +146,9 @@ class LaunchTestCase(TestCase):
     def test_a_sample_name_that_would_be_a_path_is_refused(self):
         # This string becomes a directory name under the store. `store.component_dir` contains
         # the run directory, but the sample folder inside it is named from here.
-        for bad in ("../../etc", "a/b", "", " ", ".hidden", "a b", "s1;rm -rf /"):
+        # A space *inside* a name is fine now and is asserted in test_run; what is still
+        # refused is a separator, a leading dot, and a name that is nothing but whitespace.
+        for bad in ("../../etc", "a/b", "", " ", ".hidden", "s1;rm -rf /"):
             session = self._stage()
             response = self._launch(session.id, sample=bad)
             self.assertEqual(response.status_code, 400, "accepted %r" % (bad,))
@@ -171,16 +173,9 @@ class LaunchTestCase(TestCase):
         self.assertEqual(response.json()["field"], "time_point")
         self.assertEqual(BreseqRun.objects.count(), 0)
 
-    def test_a_part_with_a_space_is_refused(self):
-        """The composed name is a directory name. The column would hold a space -- a dropped
-        folder can create a population with one -- and a name must not."""
-        session = self._stage()
-
-        response = self._launch(session.id, population="Ara 2", time_point="500",
-                                sample="763A")
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json()["field"], "population")
+    # A space in a part is *accepted* now, and asserting that needs a launch that succeeds --
+    # so it lives in test_run, where breseq is faked and the sample really lands. See
+    # `test_a_space_in_a_part_survives_to_the_sample`.
 
     def test_unbalanced_quotes_in_the_arguments_are_refused(self):
         session = self._stage()

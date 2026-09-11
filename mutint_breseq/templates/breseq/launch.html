@@ -44,25 +44,39 @@
     <form id="breseq-form">
         {% csrf_token %}
 
-        {% comment %} Four boxes for one thing, kept in step both ways: Full Name is split
-           into the three parts as you type it, and composed back from them as you edit those.
-           **The three parts are what is posted** -- `sample_names.compose_sample_name` decides
-           how they become a name, so that convention can change without this form changing.
+        {% comment %} **The menu decides which half of the form is the source of truth.**
+           There were four boxes for one thing, kept in step both ways, and that reads as two
+           questions rather than one answered two ways. Each mode now leaves one side editable
+           and disables the other, so what a person fills in is never ambiguous -- and the
+           existing two-way sync is what fills the disabled side in.
 
-           The split is `mutint_sample_names.js`, a copy of the rule the importer uses. It can
-           only mislead: the server composes and the importer parses, both in Python.
+           The third mode has no name boxes at all: the read files carry the names.
            {% endcomment %}
         <div class="form-group">
+            <label for="breseq-input-mode">Input type</label>
+            <select class="form-control" id="breseq-input-mode">
+                <option value="name">Single sample with metadata from a name</option>
+                <option value="parts">Single sample with specified population, time point</option>
+                <option value="read_names">One or more samples with metadata from read names</option>
+            </select>
+        </div>
+
+        {% comment %} Full Name and the three parts, kept in step both ways: the name is split
+           into the parts as you type it, and composed back from them as you edit those. Which
+           side is editable is the mode's to say; the other is disabled and shows what the
+           first one means.
+
+           The split is `mutint_sample_names.js`, a copy of the rule the importer uses. It can
+           only mislead: the server parses or composes, and the importer parses, all in Python.
+           {% endcomment %}
+        <div class="form-group" data-mode-show="name parts">
             <label for="breseq-sample-name">Full Name</label>
             <input type="text" class="form-control" id="breseq-sample-name"
                    placeholder="e.g. Ara-2_500gen_763A" autocomplete="off">
-            <small class="help-block">
-                What this sample is called everywhere in MutInt. Type it here and it is split
-                below, or fill the three boxes and it is built for you.
-            </small>
+            <small class="help-block" id="breseq-name-help"></small>
         </div>
 
-        <div class="row">
+        <div class="row" data-mode-show="name parts">
             <div class="col-sm-4 form-group">
                 {% comment %} Text with a list, not a select: a new sample is often the first
                    of its population, so an existing value has to be offered without being
@@ -88,7 +102,18 @@
                        autocomplete="off">
             </div>
         </div>
-        <small class="help-block" id="breseq-identity-note" style="margin-top: -0.5em;"></small>
+        <small class="help-block" id="breseq-identity-note" style="margin-top: -0.5em;"
+               data-mode-show="name parts"></small>
+
+        {% comment %} The third mode's own explanation. It has no boxes, so this is the whole
+           of what it says before the drop; what the names will actually produce is the
+           preview table under the drop zone, which the server derives. {% endcomment %}
+        <div class="alert alert-info" data-mode-show="read_names"
+             style="padding: 0.6em 1em;">
+            Each read file &mdash; or each pair of mates &mdash; is one sample, named after the
+            file with the read number, lane and extension removed. What each one will be called
+            is listed under the drop zone before anything is uploaded.
+        </div>
 
         {% comment %} Above the arguments box because it is the question people actually have
            -- clone or population -- rather than a flag to remember. Ticked it does two things
@@ -97,13 +122,14 @@
         <div class="checkbox" style="margin-bottom: 1em;">
             <label>
                 <input type="checkbox" id="breseq-population-sample">
-                Population sample (run with <code>-p</code>)
+                Population sample (run with <code>-p</code>,
+                <code>--polymorphism-prediction</code> option)
             </label>
             <small class="help-block" style="margin-top: 0;">
-                A whole evolving population sequenced together rather than a clone. breseq
-                runs in polymorphism mode, so mutations carry frequencies, and the sample is
-                recorded as a population. If you have already typed <code>-p</code> or
-                <code>--polymorphism-prediction</code> below it is left as you wrote it.
+                Select when analyzing non-clonal, mixed samples of an evolving population in
+                which you want to predict mutations at intermediate frequencies between 0 and
+                100%. When deselected, samples are assumed to be clonal and only mutations
+                present at a frequency of 100% are predicted.
             </small>
         </div>
 
@@ -120,18 +146,17 @@
         <div class="checkbox" style="margin-bottom: 0.5em;">
             <label style="padding-right: 0.5em;">
                 <input type="checkbox" id="breseq-limit-coverage">
-                Limit coverage to
+                Limit read-depth coverage of the reference genome to
             </label>
             <input type="number" class="form-control" id="breseq-coverage-limit"
                    min="1" step="any" inputmode="decimal" autocomplete="off" disabled
                    style="display: inline-block; width: 7em; vertical-align: middle;"><span
-            >-fold</span>
+            >-fold (run with <code>-l</code>, <code>--limit-fold-coverage</code> option)</span>
         </div>
         <small class="help-block" style="margin-top: 0;">
-            Left unticked, breseq uses <b>every read</b>, which is its default. Ticked, it
-            analyzes only enough reads to reach the coverage you name, which is faster with no
-            loss of sensitivity &mdash; <b>60&ndash;80</b> is the recommendation for clonal
-            samples. Passed as <code>-l</code>.
+            When selected, only enough of the input reads are analyzed to cover the reference
+            genome to this depth on average. Lower values speed up the analysis. For clonal
+            samples, 60- to 80-fold coverage is usually enough to predict all mutations.
         </small>
 
         <div class="form-group">
@@ -167,7 +192,10 @@
             <input type="file" id="breseq-file-input" multiple style="display: none;">
         </div>
 
-        <ul id="breseq-file-list" style="margin-top: 1em;"></ul>
+        {% comment %} A div rather than a list: in the read-names mode this holds the table of
+           what the drop would be read as, which the server derives -- see `views.preview`.
+           {% endcomment %}
+        <div id="breseq-file-list" style="margin-top: 1em;"></div>
 
         <div id="breseq-progress" style="display: none; margin-top: 1em;">
             <div class="progress" style="margin-bottom: 0.4em;">
@@ -194,475 +222,6 @@
 {{ runs|json_script:"breseq-runs-data" }}
 {{ existing_samples|json_script:"breseq-existing-samples" }}
 
-<script type="text/javascript">
-(function () {
-    "use strict";
-
-    var EXPERIMENT_ID = "{{ experiment_id }}";
-    var COMPONENT = "{{ component }}";
-    // Slower than the Add page's 400ms, and deliberately: what is being watched here changes
-    // on the scale of hours, not of samples-per-second. A run that has not moved in four
-    // minutes is normal.
-    var POLL_MS = 5000;
-
-    var runsData = JSON.parse(
-        document.getElementById("breseq-runs-data").textContent);
-    var runsEl = document.getElementById("breseq-runs");
-    var form = document.getElementById("breseq-form");
-    var pollTimer = null;
-    // Same guard as the Add page's: a poll already in flight when something else redraws must
-    // not paint a stale list over the top of it.
-    var pollGeneration = 0;
-
-    function esc(text) {
-        var div = document.createElement("div");
-        div.textContent = text === null || text === undefined ? "" : String(text);
-        return div.innerHTML;
-    }
-
-    function whenLocal(iso) {
-        if (!iso) { return ""; }
-        var when = new Date(iso);
-        return isNaN(when.getTime()) ? "" : when.toLocaleString();
-    }
-
-    function elapsed(run) {
-        var from = run.started_at || run.created_at;
-        var to = run.finished_at;
-        if (!from) { return ""; }
-        var end = to ? new Date(to) : new Date();
-        var seconds = Math.max(0, Math.round((end - new Date(from)) / 1000));
-        if (seconds < 90) { return seconds + "s"; }
-        if (seconds < 5400) { return Math.round(seconds / 60) + "m"; }
-        return (seconds / 3600).toFixed(1) + "h";
-    }
-
-    // The one thing the status column has to get right. A row that says "queued" is either a
-    // job waiting its turn or a job nothing will ever pick up, and the second is by far this
-    // feature's likeliest failure -- so where the queue can tell us, it does.
-    function statusCell(run) {
-        if (run.status === "imported") {
-            return '<span class="label label-success">Imported</span>';
-        }
-        if (run.status === "failed") {
-            return '<span class="label label-danger">Failed</span>';
-        }
-        if (run.status === "running") {
-            return '<span class="label label-info">Running</span>';
-        }
-        var note = "";
-        if (run.queue_status === "READY" || run.queue_status === "") {
-            note = '<br><small style="color: #a94442;">waiting for a worker &mdash; ' +
-                   'run <code>./mutint db_worker</code></small>';
-        }
-        return '<span class="label label-default">Queued</span>' + note;
-    }
-
-    // The job's own log page, for every run that has written anything -- including one that
-    // is still running, which is the case the fold below cannot serve because `run.log` is
-    // only filled in once the tools have finished.
-    function logLink(run) {
-        if (!run.log_url) { return ""; }
-        return '<a href="' + esc(run.log_url) + '">log</a>';
-    }
-
-    function resultCell(run) {
-        var bits = [];
-        if (run.status === "imported") {
-            if (run.sample_id) {
-                bits.push('<a href="/mutations/breseq?experiment_id=' + EXPERIMENT_ID +
-                          "&sample_id=" + run.sample_id + '">Mutations</a>');
-            }
-            if (run.report_url) {
-                bits.push('<a href="' + run.report_url + '" target="_blank">' +
-                          "breseq report</a>");
-            }
-        } else if (run.error) {
-            bits.push('<span style="color: #a94442;">' + esc(run.error) + "</span>");
-        }
-        var log = logLink(run);
-        if (log) { bits.push(log); }
-        return bits.join(" &middot; ") || "&mdash;";
-    }
-
-    function detailRow(run) {
-        var parts = [];
-        if (run.population_sample) {
-            parts.push("<b>Population sample</b> <code>-p</code>");
-        }
-        if (run.coverage_limit) {
-            parts.push("<b>Coverage limit</b> " + esc(run.coverage_limit) + "-fold");
-        }
-        if (run.arguments) {
-            parts.push("<b>Arguments</b> <code>" + esc(run.arguments) + "</code>");
-        }
-        if ((run.read_files || []).length) {
-            parts.push("<b>Reads</b> " + esc(run.read_files.join(", ")) +
-                       (run.trim_reads ? " (trimmed with fastp)" : " (untrimmed)"));
-        }
-        if (!parts.length) { return ""; }
-        return '<tr><td colspan="5" style="border-top: 0; padding-top: 0; color: #666;">' +
-               '<small>' + parts.join(" &nbsp;&middot;&nbsp; ") + "</small></td></tr>";
-    }
-
-    function logRow(run) {
-        if (!run.log || run.status !== "failed") { return ""; }
-        return '<tr><td colspan="5" style="border-top: 0; padding-top: 0;">' +
-               '<details><summary style="cursor: pointer; color: #666;">' +
-               "<small>run output</small></summary>" +
-               '<pre style="max-height: 20em; overflow: auto; font-size: 11px;">' +
-               esc(run.log) + "</pre></details></td></tr>";
-    }
-
-    function renderRuns(runs) {
-        if (!runs.length) {
-            runsEl.innerHTML = '<p style="color: #666;">Nothing has been run for this ' +
-                               "experiment yet.</p>";
-            return;
-        }
-        var html = ['<table class="table table-condensed">',
-                    "<thead><tr><th>Sample</th><th>Status</th><th>Started</th>",
-                    "<th>Took</th><th>Result</th></tr></thead><tbody>"];
-        runs.forEach(function (run) {
-            html.push("<tr>",
-                      "<td>" + esc(run.sample_name) + "</td>",
-                      "<td>" + statusCell(run) + "</td>",
-                      "<td><small>" + esc(whenLocal(run.started_at || run.created_at)) +
-                          "</small></td>",
-                      "<td><small>" + esc(elapsed(run)) + "</small></td>",
-                      "<td>" + resultCell(run) + "</td>",
-                      "</tr>", detailRow(run), logRow(run));
-        });
-        html.push("</tbody></table>");
-        runsEl.innerHTML = html.join("");
-    }
-
-    function anyUnfinished(runs) {
-        return runs.some(function (run) {
-            return run.status === "queued" || run.status === "running";
-        });
-    }
-
-    function stopPolling() {
-        if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
-        pollGeneration += 1;
-    }
-
-    // Polls only while something is actually in flight, and stops when nothing is. A page
-    // left open on a finished experiment should cost nothing.
-    function startPolling() {
-        stopPolling();
-        var mine = pollGeneration;
-
-        function poll() {
-            fetch("/breseq/runs?experiment_id=" + EXPERIMENT_ID)
-                .then(function (resp) { return resp.ok ? resp.json() : null; })
-                .then(function (body) {
-                    if (mine !== pollGeneration) { return; }
-                    if (body && body.runs) {
-                        runsData = body.runs;
-                        renderRuns(runsData);
-                        if (!anyUnfinished(runsData)) { stopPolling(); return; }
-                    }
-                    pollTimer = setTimeout(poll, POLL_MS);
-                })
-                .catch(function () {
-                    if (mine !== pollGeneration) { return; }
-                    pollTimer = setTimeout(poll, POLL_MS);
-                });
-        }
-        pollTimer = setTimeout(poll, POLL_MS);
-    }
-
-    function refresh(runs) {
-        runsData = runs;
-        renderRuns(runsData);
-        if (anyUnfinished(runsData)) { startPolling(); } else { stopPolling(); }
-    }
-
-    renderRuns(runsData);
-    if (anyUnfinished(runsData)) { startPolling(); }
-
-    // Everything below is the form, which a reader without write access does not get.
-    if (!form) { return; }
-
-    var selected = [];
-    var dropzone = document.getElementById("breseq-dropzone");
-    var fileInput = document.getElementById("breseq-file-input");
-    var fileListEl = document.getElementById("breseq-file-list");
-    var submitBtn = document.getElementById("breseq-submit");
-    var nameInput = document.getElementById("breseq-sample-name");
-    var populationInput = document.getElementById("breseq-population");
-    var timePointInput = document.getElementById("breseq-time-point");
-    var sampleInput = document.getElementById("breseq-sample");
-    var identityNote = document.getElementById("breseq-identity-note");
-    var argsInput = document.getElementById("breseq-arguments");
-
-    // --- the four name boxes, kept in step both ways -----------------------------------
-    //
-    // Full Name is what a person recognises; the three parts are what is posted. Neither is
-    // a second source of truth, because one is always derived from the other: typing a name
-    // splits it, editing a part rebuilds it.
-    //
-    // `mutintSampleName` is the browser's copy of `mutint_import/sample_names.py`. It shows
-    // what will happen and decides nothing -- the server composes the name from the three
-    // parts and the importer parses it, both in Python.
-
-    var syncing = false;
-    var EXISTING = JSON.parse(
-        document.getElementById("breseq-existing-samples").textContent);
-
-    // A sample this run would land on top of, or null.
-    //
-    // **A collision supersedes rather than refuses.** The importer reuses the sample at a
-    // coordinate and clears its mutation calls before writing the new ones, which is how a
-    // corrected run replaces the one before it -- so this warns and never blocks. The two
-    // keys are the importer's own: a placed name matches on the coordinate, a name carrying
-    // none matches on the name it was imported under.
-    function collision(population, timePoint, sample, name) {
-        for (var i = 0; i < EXISTING.length; i += 1) {
-            var row = EXISTING[i];
-            if (population && timePoint) {
-                if (row.population === population && row.time_point === timePoint
-                        && row.sample === sample) {
-                    return row;
-                }
-            } else if (name && row.source_name === name) {
-                return row;
-            }
-        }
-        return null;
-    }
-
-    // What the import will do with this name, said in the boxes rather than in prose. A name
-    // carrying no coordinate is not an error: it is the unplaced case, and the sample lands
-    // on `Unspecified` with no time point.
-    function splitFromName() {
-        if (syncing) { return; }
-        syncing = true;
-        var name = nameInput.value.trim();
-        var parsed = window.mutintSampleName.parse(name);
-        if (parsed) {
-            populationInput.value = parsed.population;
-            timePointInput.value = String(parsed.timePoint);
-            sampleInput.value = parsed.sample;
-        } else {
-            populationInput.value = "";
-            timePointInput.value = "";
-            sampleInput.value = name;
-        }
-        noteOutcome(populationInput.value, timePointInput.value, sampleInput.value, name);
-        syncing = false;
-    }
-
-    // The other direction. A name carries all three parts or none of them -- there is no
-    // spelling for a population with no time point -- so clearing exactly one of the first
-    // two says so rather than silently writing a name that means something else.
-    function composeFromParts() {
-        if (syncing) { return; }
-        syncing = true;
-        var population = populationInput.value.trim();
-        var timePoint = timePointInput.value.trim();
-        var sample = sampleInput.value.trim();
-
-        if (!population && !timePoint) {
-            nameInput.value = sample;
-            noteOutcome("", "", sample, sample);
-        } else if (population && timePoint) {
-            nameInput.value = window.mutintSampleName.compose(population, timePoint, sample);
-            noteOutcome(population, timePoint, sample, nameInput.value);
-        } else {
-            // No name can say this, so none is written: a population and a time point travel
-            // together or not at all.
-            note("A name carries a population and a time point together or neither. " +
-                 "Fill the other in, or clear both to leave the sample unplaced.");
-        }
-        syncing = false;
-    }
-
-    function note(message, kind) {
-        identityNote.textContent = message;
-        // Amber for something to think about, grey for something merely worth knowing.
-        identityNote.style.color = !message ? "" : (kind === "info" ? "#666" : "#8a6d3b");
-    }
-
-    // Said after every sync, and last, so a name that cannot be built is reported before a
-    // name that would replace something.
-    function noteOutcome(population, timePoint, sample, name) {
-        var existing = collision(population, timePoint, sample, name);
-        if (existing) {
-            note("This replaces " + existing.label + ", which is already in this experiment: "
-                 + "its mutations are cleared and rewritten by the import. Nothing else about "
-                 + "the sample changes.");
-            return;
-        }
-        note(population || timePoint
-            ? ""
-            : (sample ? "No population or time point, so this sample is filed under "
-                        + "Unspecified with no time point." : ""),
-            "info");
-    }
-
-    nameInput.addEventListener("input", splitFromName);
-    // Re-read on blur so the boxes show the *name's* reading rather than what was typed into
-    // them: put an underscore in Population and the composed name has four fields and carries
-    // no coordinate, which the boxes then say instead of pretending it worked.
-    [populationInput, timePointInput, sampleInput].forEach(function (input) {
-        input.addEventListener("input", composeFromParts);
-        input.addEventListener("blur", splitFromName);
-    });
-    var trimInput = document.getElementById("breseq-trim-reads");
-    // Not `populationInput`, which is the Population *name* box above -- two different
-    // meanings of the word, a few lines apart.
-    var populationSampleInput = document.getElementById("breseq-population-sample");
-    var coverageLimitInput = document.getElementById("breseq-coverage-limit");
-    var limitCoverageInput = document.getElementById("breseq-limit-coverage");
-
-    // The checkbox owns whether there is a limit; the box owns how much. Ticking it fills in
-    // the middle of the recommended range rather than leaving an enabled empty box, which
-    // would be a third state saying nothing. Unticking leaves the number where it is -- it is
-    // visibly disabled, and not sent -- so changing your mind twice costs no typing.
-    var DEFAULT_COVERAGE_LIMIT = "80";
-
-    function syncCoverageLimit() {
-        coverageLimitInput.disabled = !limitCoverageInput.checked;
-        if (limitCoverageInput.checked) {
-            if (!coverageLimitInput.value) {
-                coverageLimitInput.value = DEFAULT_COVERAGE_LIMIT;
-            }
-            coverageLimitInput.focus();
-            coverageLimitInput.select();
-        }
-    }
-
-    limitCoverageInput.addEventListener("change", syncCoverageLimit);
-    var errorEl = document.getElementById("breseq-error");
-    var progressEl = document.getElementById("breseq-progress");
-    var progressBar = document.getElementById("breseq-progress-bar");
-    var progressText = document.getElementById("breseq-progress-text");
-
-    function humanBytes(size) {
-        if (size < 1024) { return size + " B"; }
-        if (size < 1048576) { return (size / 1024).toFixed(0) + " KB"; }
-        if (size < 1073741824) { return (size / 1048576).toFixed(1) + " MB"; }
-        return (size / 1073741824).toFixed(2) + " GB";
-    }
-
-    function renderList() {
-        fileListEl.innerHTML = selected.map(function (entry) {
-            return "<li>" + esc(entry.path) + " <small style='color: #666;'>" +
-                   humanBytes(entry.file.size) + "</small></li>";
-        }).join("");
-        submitBtn.disabled = !selected.length;
-    }
-
-    function addEntries(entries) {
-        entries.forEach(function (entry) {
-            // A second drop adds to the first rather than replacing it, so a pair whose mates
-            // live in different folders can be assembled in two gestures. Same path twice is
-            // the same file.
-            if (!selected.some(function (had) { return had.path === entry.path; })) {
-                selected.push(entry);
-            }
-        });
-        renderList();
-    }
-
-    function setProgress(done, total, label) {
-        progressEl.style.display = "block";
-        var pct = total ? Math.floor((done / total) * 100) : 0;
-        progressBar.style.width = pct + "%";
-        progressBar.textContent = pct + "%";
-        progressText.textContent = label;
-    }
-
-    function renderError(message) {
-        errorEl.innerHTML = '<div class="alert alert-danger" style="margin-top: 1em;">' +
-                            esc(message) + "</div>";
-    }
-
-    dropzone.addEventListener("click", function () { fileInput.click(); });
-    fileInput.addEventListener("change", function () {
-        addEntries(mutintFromFileList(fileInput.files));
-    });
-    ["dragenter", "dragover"].forEach(function (evt) {
-        dropzone.addEventListener(evt, function (e) {
-            e.preventDefault(); dropzone.style.background = "#eef6ff";
-        });
-    });
-    ["dragleave", "drop"].forEach(function (evt) {
-        dropzone.addEventListener(evt, function (e) {
-            e.preventDefault(); dropzone.style.background = "#fafafa";
-        });
-    });
-    dropzone.addEventListener("drop", function (e) {
-        mutintCollectDropped(e.dataTransfer).then(addEntries);
-    });
-
-    form.addEventListener("submit", function (e) {
-        e.preventDefault();
-        if (!selected.length) { return; }
-        errorEl.innerHTML = "";
-        // Only when a limit was asked for -- a disabled input is barred from constraint
-        // validation and always reports itself valid, so the checkbox has to be asked first.
-        //
-        // The form is submitted through JS, so the browser's own validation never runs, and a
-        // `type="number"` box holding something it will not parse reports an **empty** value.
-        // Ticked-and-empty would therefore post as "every read", which is the opposite of
-        // what the tick said. Asked before the upload, so a typo costs nothing at all.
-        if (limitCoverageInput.checked && !coverageLimitInput.checkValidity()) {
-            renderError("Limit coverage to a number greater than zero, or untick the box to " +
-                        "use every read.");
-            coverageLimitInput.focus();
-            return;
-        }
-        submitBtn.disabled = true;
-        setProgress(0, 1, "Preparing…");
-
-        mutintUpload(selected, {
-            experimentId: EXPERIMENT_ID,
-            consumer: COMPONENT,
-            onProgress: setProgress
-        }).then(function (uploadId) {
-            setProgress(1, 1, "Queueing the run…");
-            return mutintPostJson("/breseq/launch?experiment_id=" + EXPERIMENT_ID, {
-                upload_id: uploadId,
-                // The parts, not the joined name: how they become one is the server's.
-                population: populationInput.value,
-                time_point: timePointInput.value,
-                sample: sampleInput.value,
-                arguments: argsInput.value,
-                trim_reads: trimInput.checked,
-                population_sample: populationSampleInput.checked,
-                // The number alone: unticked sends blank, which is already how the server
-                // spells "every read". Nothing posts the checkbox itself, so the two can
-                // never arrive disagreeing.
-                coverage_limit: limitCoverageInput.checked ? coverageLimitInput.value : ""
-            });
-        }).then(function (body) {
-            progressEl.style.display = "none";
-            // **The files go, the form stays.** A batch is usually one population and one
-            // time point with a different sample each time, so clearing those would make the
-            // common case the one that costs the most typing. The Sample box is the thing to
-            // change before the next drop, and it is left in view rather than emptied.
-            selected = [];
-            renderList();
-            // A run already in flight for this sample was asked to stop -- its output was
-            // about to be overwritten by this one. Said here because it happened on the
-            // server and the run list shows it only once the worker has acted on the flag.
-            if (body.superseded) {
-                note("Stopped " + body.superseded + " run" +
-                     (body.superseded === 1 ? "" : "s") +
-                     " already under way for this sample.");
-            }
-            refresh(body.runs || []);
-        }).catch(function (err) {
-            progressEl.style.display = "none";
-            renderError(err.message || String(err));
-        }).then(function () {
-            renderList();
-        });
-    });
-}());
-</script>
+{{ launch_config|json_script:"breseq-config" }}
+<script src="{% static "mutint_breseq/launch.js" %}?v={{ asset_version }}"></script>
 {% endblock %}

@@ -27,19 +27,28 @@ a project's `.gitmodules` is how a component is not installed.
 
 ---
 
-## The four pieces
+## The pieces
 
 | file | what |
 |---|---|
 | `runner.py` | pure: both argvs (fastp's and breseq's), the PATH, what counts as usable output, what to keep. It runs nothing -- `mutint_jobs.processes.run_tool` does |
 | `pairing.py` | pure: breseq's rule for which read files are mates, and which files fastp must not touch |
+| `read_names.py` | pure: what a read file's name says the sample is called, and which files are one sample |
 | `tasks.py` | the `@task` — trim, run breseq, check, import, clean up |
-| `views.py` | the page, the launch endpoint, the run list |
+| `views.py` | the page, the launch endpoint, the preview, the run list |
 | `models.py` | `BreseqRun`, and the receiver that owns its directory |
+| `static/mutint_breseq/launch.js` | the page's behaviour: the input-type menu, the boxes, the drop zone, the run list |
 
-`runner.py` is pure on purpose, in the shape `mutint_sample/locus.py` is: the two rules most
-likely to be changed by accident are what reaches breseq's argv and what has to be on disk
-before the importer is called, and both are testable without breseq, a worker or a request.
+The first three are pure on purpose, in the shape `mutint_sample/locus.py` is: the rules most
+likely to be changed by accident are what reaches breseq's argv, what has to be on disk before
+the importer is called, and how twenty files become ten samples -- all testable without breseq,
+a worker or a request.
+
+**The page's script is a file, not an inline `<script>`**, and moved when the input-type menu
+made it four hundred lines inside a template that also holds the markup. It lives under
+`static/`, which is `AppDirectoriesFinder`'s directory and the one a plugin gets for free --
+`mutint_common/staticfiles/` is core's own and is named explicitly in `STATICFILES_DIRS`. The
+two values it used to interpolate reach it through a `json_script` element instead.
 
 ---
 
@@ -100,26 +109,121 @@ and `reference.sequence_set_digest` of the two is equal — which is what stops
 `_establish_or_check_reference` rejecting every run as a reference mismatch. Verified before
 this was written.
 
-### The name is four boxes, and the three parts are what is posted
+### The Input type menu, and the three contracts behind it
 
-**Full Name** plus **Population**, **Time point** and **Sample**, kept in step both ways:
-typing a name splits it, editing a part rebuilds it. The split is
-`mutint_common/staticfiles/js/mutint_sample_names.js`, core's transcription of
-`mutint_import/sample_names.py`.
+There were four boxes for one thing -- **Full Name** plus **Population**, **Time point** and
+**Sample**, kept in step both ways -- and that reads as two questions rather than one answered
+two ways. The menu says which half is being filled in, and the other half is **disabled**,
+showing what the first one means. The two-way sync is unchanged; what is new is that one side
+is always authoritative.
 
-**The endpoint takes the three parts, not the joined name**, and
-`sample_names.compose_sample_name` makes the name. That is deliberate: how a coordinate
-becomes a string is one rule in one place, and it can change without this form changing with
-it. The composer refuses what cannot be a name -- a population without a time point, a space
-in a part, a fractional time point -- and says *which field* is at fault, so the page can
-point at the box rather than at the form.
+`disabled` rather than `readonly`: a disabled input posts nothing and cannot be focused, which
+is exactly "not editable unless you switch to that version of the form". `readonly` looks
+identical and still submits.
 
-**The preview can be wrong and the import cannot.** The JS decides nothing; the server composes
-and the importer parses, both in Python. That is the whole argument for having a second copy of
-the rule at all, and the JS header records the two ways it is known to under-read.
+**The three modes are three server contracts**, not one with optional fields:
+
+| mode | posts | server |
+|---|---|---|
+| `parts` | population, time point, sample | `compose_sample_name` -- one rule for how a coordinate becomes a string |
+| `name` | the name | stored **verbatim** |
+| `read_names` | nothing about names | `read_names.derive_samples` over the staged files |
+
+`parts` is the default, because it is the contract every existing caller posts and because a
+mode nobody named should be the one that composes rather than the one that trusts a string. An
+unknown mode is a 400: guessing `parts` would launch one sample for a drop somebody meant as
+ten.
+
+**`name` stores the name verbatim, and that is a change.** Every mode used to post the three
+parts and the server recomposed -- which is not a round trip. `3-30000-1-1` parses to population
+3, time point 30000, label `1-1`, and composes back to `3_30000_1-1`, so somebody who typed a
+perfectly good A-F-I-R name got a different one. A mode called *metadata from a name* has to
+leave the name alone; the coordinate is still read out of it by the importer, exactly as it
+would be from a dropped folder of that name.
+
+**The split shown under the name is still `mutint_sample_names.js`**, core's transcription of
+`sample_names.py`, and it still decides nothing -- the server parses or composes and the
+importer parses, all in Python. That is the whole argument for having a second copy of that
+rule at all, and the JS header records the ways it is known to under-read.
 
 **A blank Population and Time point is the unplaced case**, and the page says so: the sample
 lands on `Unspecified` with no time point rather than on a population called `1`.
+
+**The menu is remembered per person** through `mutint_common.preferences`
+(`breseq.input_mode`), the way the Import data page remembers its tab. One key rather than one
+per experiment: which way in somebody uses is a habit rather than a property of the data.
+
+### One drop can be several samples, and that is N rows
+
+`read_names` mode derives one sample per read file set and creates **one `BreseqRun` per
+sample** -- each with its own `component_dir`, its own breseq invocation, its own job on
+`/jobs/` and its own Cancel. Every invariant a single run has is kept; nothing about the model,
+the task or the importer changed, and there was no migration.
+
+**N rows rather than one row with N samples, and the receiver is why.** `models.py`'s
+`post_delete` rmtrees `component_dir(COMPONENT, pk)` -- the run's *whole* directory -- so two
+rows sharing one would mean deleting either destroys the other's reads mid-run. A single row
+holding several samples fails differently and worse: `tasks.py` reads `summary["files"][0]`,
+looks one sample up by `run.sample_name`, and cleans up one `output_dir`, so samples two
+onwards would import unchecked, link to no run, and leave their output in the store for ever.
+
+Three things in `launch` follow from the loop, and the first is the one that bites:
+
+- **Every name is superseded before any row is created.** `_supersede_in_flight` matches on the
+  sample name and knows nothing about which launch a row came from, so called inside the loop,
+  run two's supersede would cancel run one from this same launch.
+- **`_take_reads` takes one run's share**, named rather than "everything under the root". The
+  shares are disjoint, so files are moved and nothing is stored twice.
+- **A partial failure unwinds every row**, not the one that failed. A half-launched drop is
+  worse than none: the samples that did start would have to be found and cancelled by hand.
+
+There is deliberately **no batch column**. The run list is ordered `-created_at`, so a launch's
+rows are already adjacent, and a grouping key would be a mechanism with one producer.
+
+### The preview is a round trip, not a second copy of the rule
+
+`POST /breseq/preview` takes filenames -- no bytes, no session, no state -- and answers one row
+per sample the drop would produce: its name, its files, the coordinate the importer will read
+out of that name, and the sample it would replace. The page draws it under the drop zone
+whenever the selection changes.
+
+**A JavaScript copy of the derivation is the alternative and is refused here.** The suite
+already carries one such copy, `mutint_sample_names.js`, and its own agreement test states the
+cost: it can check that the two *specifications* match and never that the JS implementation
+matches its own table. That copy earns its place because a name box needs an answer per
+keystroke. A file drop is a discrete event, so it can afford a round trip -- and one derivation
+with two callers cannot drift from itself.
+
+`_flat_name` is shared by the preview and by `_take_reads` for the same reason: the derivation
+runs over the flattened names, so a second spelling would make the preview promise names the
+run would not produce.
+
+### Deriving a sample from a read filename
+
+`read_names.py` strips what a file's name carries *beyond* the sample's -- the extension, the
+lane, the read number, the chunk index -- and hands the remainder to core's
+`parse_sample_identity`. **It parses no coordinates itself**, so a sample analyzed from reads
+and the same sample uploaded as a breseq folder cannot disagree about where they land.
+
+**It says nothing about clonality either.** The Population sample checkbox governs every sample
+in the drop. A vocabulary of words meaning *clone* would be a second thing to keep up to date
+and a silent way for one sample in twenty to differ from what the form said.
+
+**Strip first, pair second, and that order was found by measuring.** The obvious design reads
+the read number off the one character that differs between mates -- breseq's own rule, needing
+no vocabulary. It is wrong here: with two lanes in the drop, `S12_L001_R1_001` can be paired
+with its own R2 *or* with `S12_L002_R1_001`, breseq resolves that by input order, and the
+differing character is then the **lane** digit. The derived name came out as `S12_L00`. So the
+lane goes first, by name; mates are found afterwards, over the stripped names, where there is
+no lane left to mistake.
+
+**Sets deriving the same name merge into one sample**, which is what a lane split is: four
+files, one library, one sample.
+
+**A bare trailing `1`/`2` is only a read number when a mate was actually found.** `Ara-2_500gen_2`
+is a sample whose isolate is called 2, and a rule that ate it would file the sample at a time
+point with no isolate. Likewise a trailing `001` is only a chunk index in the company of a lane
+or a read number.
 
 **A collision warns and does not block.** Importing a sample the experiment already holds
 *supersedes* it -- `_database_gd_mutations` clears its calls before writing the new ones -- and
@@ -389,8 +493,11 @@ which is exactly when the reads matter.
   Core's importer asks for every registered rebuild itself.
 - **No export handler, no example dataset.** It adds no mutation type, and an example would
   have to ship reads and run breseq to demonstrate anything.
-- **No multi-sample launch.** One launch is one sample. Several launches queue.
-- **No anonymous use.** `breseq`, `launch`, `runs` and `run_delete` all say
+- **No table of sample names to fill in.** One launch is several samples only when the read
+  files carry the names -- see **One drop can be several samples**. There is no form for
+  naming twenty samples by hand, because a filename is a better place to put a name than a
+  row of boxes somebody retypes.
+- **No anonymous use.** `breseq`, `launch`, `preview`, `runs` and `run_delete` all say
   `if not request.user.is_authenticated` outright, as `project_create` does, even though
   `can_edit_experiment` already refuses anonymous. The rule is stated rather than left to be
   inferred from three files — the shape that has bitten this suite before is an endpoint whose
@@ -411,7 +518,7 @@ cd mutint && ./mutint test mutint_breseq
 
 There is no way to run them from mutint-core: the plugin is not installed there.
 
-**130 tests**, and the end-to-end ones are affordable because of two things. The test runner
+**149 tests**, and the end-to-end ones are affordable because of two things. The test runner
 forces `django.tasks` to its immediate backend, so `.enqueue()` runs inline and one POST
 exercises launch, the subprocess, the ingest and the cleanup. And `tests/fake_breseq.py` is a
 **real executable on disk** rather than a `subprocess.run` patch — the two things most likely
