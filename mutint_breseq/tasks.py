@@ -27,6 +27,7 @@ from django.conf import settings
 from django.tasks import task
 from django.utils import timezone
 
+from mutint_common.storage_registry import request_remeasure
 from mutint_common import store
 from mutint_common.tools import ToolMissing
 from mutint_import import breseq_folder, import_lock, sra_fetch
@@ -85,6 +86,7 @@ def _cancelled(run, log=None):
     shutil.rmtree(run.reads_dir(), ignore_errors=True)
     shutil.rmtree(run.trimmed_dir(), ignore_errors=True)
     shutil.rmtree(run.output_dir(), ignore_errors=True)
+    request_remeasure(run.experiment_id, reason="breseq run %s cancelled" % run.pk)
     logger.info("breseq run %s cancelled", run.pk)
 
 
@@ -99,6 +101,9 @@ def _fail(run, message, log=None):
     if log is not None:
         run.log = log
     run.save(update_fields=["status", "error", "finished_at", "log"])
+    # The directory is kept, and by now holds whatever breseq wrote before it stopped --
+    # which the last measurement, taken at launch, did not see.
+    request_remeasure(run.experiment_id, reason="breseq run %s failed" % run.pk)
 
 
 def _tail(queue_id, run):
@@ -507,6 +512,10 @@ def run_breseq(context, run_id):
     # Everything worth keeping -- data/'s four files and breseq's HTML report -- is already in
     # the store under the sample, put there by the importer above.
     runner.cleanup_after_import(run.directory(), run.output_dir())
+    # The import's own rebuild measured this experiment *before* the cleanup, with the
+    # reads, the trimmed reads and breseq's output all still here; without this the stored
+    # size is too high by all of that until something else remeasures.
+    request_remeasure(run.experiment_id, reason="breseq run %s imported" % run.pk)
 
     run.status = STATUS_IMPORTED
     run.sample = sample

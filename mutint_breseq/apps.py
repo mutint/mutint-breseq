@@ -28,6 +28,16 @@ class BreseqConfig(AppConfig):
                             requires_reference=True)
         register_about_section(self, name='mutint-breseq', version=__version__,
                                template='about/sections/mutint_breseq.html')
+        # The run directories, counted on the dashboard and the Overview and offered for
+        # nothing: a failed run keeps its reads on purpose, and deleting the run is how they
+        # are freed. See storage.py, and `request_remeasure` in tasks.py and views.py for
+        # where this plugin says its files moved.
+        from mutint_common.storage_registry import register_storage_kind
+        from mutint_breseq.storage import KIND, measure_runs
+        register_storage_kind(self, key=KIND, label='breseq run directories',
+                              measure=measure_runs,
+                              description="Reads and output kept by runs that failed. "
+                                          "Delete the run on the Run breseq page to free them.")
 
         # Nothing else is registered, and each absence is a decision:
         #
