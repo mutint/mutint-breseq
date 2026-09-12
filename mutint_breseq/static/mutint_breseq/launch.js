@@ -48,9 +48,15 @@
         if (!from) { return ""; }
         var end = to ? new Date(to) : new Date();
         var seconds = Math.max(0, Math.round((end - new Date(from)) / 1000));
-        if (seconds < 90) { return seconds + "s"; }
-        if (seconds < 5400) { return Math.round(seconds / 60) + "m"; }
-        return (seconds / 3600).toFixed(1) + "h";
+        // Whole units from the largest that applies down to seconds, every lower unit kept
+        // even at zero -- "1h 0m 0s" rather than "1h" -- so a column of these lines up and a
+        // run that took an hour reads differently from one that took an hour and a half.
+        var hours = Math.floor(seconds / 3600);
+        var minutes = Math.floor((seconds % 3600) / 60);
+        var rest = seconds % 60;
+        if (hours) { return hours + "h " + minutes + "m " + rest + "s"; }
+        if (minutes) { return minutes + "m " + rest + "s"; }
+        return rest + "s";
     }
 
     // The one thing the status column has to get right. A row that says "queued" is either a
@@ -224,10 +230,15 @@
     if (!form) { return; }
 
     var selected = [];
+    // Set for the length of an upload. `mutintUpload` holds its own copy of the list, so a
+    // file removed meanwhile would still go up and the page would lie about what is going;
+    // Remove and Reset refuse while this is set, as the Import data page's do.
+    var uploading = false;
     var dropzone = document.getElementById("breseq-dropzone");
     var fileInput = document.getElementById("breseq-file-input");
     var fileListEl = document.getElementById("breseq-file-list");
     var submitBtn = document.getElementById("breseq-submit");
+    var resetBtn = document.getElementById("breseq-reset");
     var nameInput = document.getElementById("breseq-sample-name");
     var populationInput = document.getElementById("breseq-population");
     var timePointInput = document.getElementById("breseq-time-point");
@@ -461,11 +472,40 @@
         return (size / 1073741824).toFixed(2) + " GB";
     }
 
+    // One row per staged file, each with its own Remove: reads are individual files, so
+    // the unit somebody takes back is the file (the Import data page's is the drop, a breseq
+    // folder being hundreds of files). The path rides in a data attribute rather than an
+    // inline handler -- filenames are the person's own text -- and one delegated listener
+    // below reads it back.
     function fileListHtml() {
         return "<ul>" + selected.map(function (entry) {
             return "<li>" + esc(entry.path) + " <small style='color: #666;'>" +
-                   humanBytes(entry.file.size) + "</small></li>";
+                   humanBytes(entry.file.size) + "</small> " +
+                   "<button type=\"button\" class=\"btn btn-link btn-xs breseq-remove\"" +
+                   " data-path=\"" + esc(entry.path) + "\"" +
+                   (uploading ? " disabled" : "") + ">Remove</button></li>";
         }).join("") + "</ul>";
+    }
+
+    // A removal is a splice and a redraw: `renderList` already re-runs the preview where one
+    // is drawn, and `previewGeneration` already discards a preview in flight for the longer
+    // list. Refused mid-upload for the reason `uploading` gives.
+    function removeEntry(path) {
+        if (uploading) { return; }
+        selected = selected.filter(function (entry) { return entry.path !== path; });
+        renderList();
+    }
+
+    // Everything staged, the accessions with it: they are the run's input the way the files
+    // are, and a successful launch already clears both together. The file input is reset so
+    // that picking the same file again fires `change`, which a browser does not do for a
+    // value it thinks is unchanged.
+    function resetSelection() {
+        if (uploading) { return; }
+        selected = [];
+        if (accessionsEl) { accessionsEl.value = ""; }
+        fileInput.value = "";
+        renderList();
     }
 
     // A poll already in flight when the drop changes must not paint a stale table over a newer
@@ -581,6 +621,7 @@
     function renderList() {
         var typed = accessionsText();
         submitBtn.disabled = !selected.length && !typed;
+        if (resetBtn) { resetBtn.disabled = uploading || (!selected.length && !typed); }
         if (!selected.length && !typed) { fileListEl.innerHTML = ""; return; }
         // The table is drawn whenever an accession is typed, whatever the mode: what an
         // accession resolved to is worth seeing before the download is committed to.
@@ -617,7 +658,16 @@
     dropzone.addEventListener("click", function () { fileInput.click(); });
     fileInput.addEventListener("change", function () {
         addEntries(mutintFromFileList(fileInput.files));
+        // So the same file can be picked again after being removed; see `resetSelection`.
+        fileInput.value = "";
     });
+    fileListEl.addEventListener("click", function (e) {
+        var button = e.target.closest ? e.target.closest(".breseq-remove") : null;
+        if (!button) { return; }
+        e.preventDefault();
+        removeEntry(button.getAttribute("data-path"));
+    });
+    if (resetBtn) { resetBtn.addEventListener("click", resetSelection); }
     ["dragenter", "dragover"].forEach(function (evt) {
         dropzone.addEventListener(evt, function (e) {
             e.preventDefault(); dropzone.style.background = "#eef6ff";
@@ -638,6 +688,7 @@
         // redrew on every keystroke would ask about `S`, `SR`, `SRR`...
         accessionsEl.addEventListener("input", function () {
             submitBtn.disabled = !selected.length && !accessionsText();
+            if (resetBtn) { resetBtn.disabled = uploading || submitBtn.disabled; }
         });
         accessionsEl.addEventListener("change", renderList);
     }
@@ -660,6 +711,8 @@
             return;
         }
         submitBtn.disabled = true;
+        uploading = true;
+        renderList();                     // greys every Remove and the Reset
         setProgress(0, 1, "Preparing…");
 
         // No session when nothing was dropped: a session exists to receive bytes, and a
@@ -725,6 +778,7 @@
                 accessionsEl.focus();
             }
         }).then(function () {
+            uploading = false;
             renderList();
         });
     });

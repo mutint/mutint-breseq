@@ -95,6 +95,23 @@ class LaunchTestCase(TestCase):
         # Trimming is offered and on by default.
         self.assertContains(response, 'id="breseq-trim-reads" checked')
 
+    def test_the_form_offers_a_reset_and_the_script_a_per_file_remove(self):
+        """The template test reaches the button; launch.js is a static file no template
+        renders, so its helpers are pinned by reading it -- the way test_crud pins
+        mutint_crud.js. A page that lost either would fail silently on click."""
+        from django.contrib.staticfiles import finders
+
+        response = self.client.get("/breseq/?experiment_id=%s" % self.experiment.id)
+        self.assertContains(response, 'id="breseq-reset"')
+
+        path = finders.find("mutint_breseq/launch.js")
+        self.assertIsNotNone(path)
+        with open(path, encoding="utf-8") as handle:
+            source = handle.read()
+        for name in ("breseq-remove", "function removeEntry", "function resetSelection",
+                     "var uploading"):
+            self.assertIn(name, source)
+
     def test_without_a_reference_the_form_is_replaced_by_a_banner(self):
         from mutint_experiment.views import _create_experiment
         bare = _create_experiment(self.project, "bare", self.owner)
@@ -112,6 +129,7 @@ class LaunchTestCase(TestCase):
         response = self.client.get("/breseq/?experiment_id=%s" % self.experiment.id)
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, 'id="breseq-sample-name"')
+        self.assertNotContains(response, 'id="breseq-reset"')
 
     # --- refusals -----------------------------------------------------------------------
 

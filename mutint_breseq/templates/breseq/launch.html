@@ -230,6 +230,11 @@
 
         <button type="submit" class="btn btn-primary" id="breseq-submit" disabled>
             Run breseq</button>
+        {% comment %} Clears the staged files and the accessions together, as a successful
+           launch does: both are the run's input. Each staged file also carries its own
+           Remove, drawn by launch.js. {% endcomment %}
+        <button type="button" class="btn btn-default" id="breseq-reset" disabled>
+            Reset</button>
         <a class="btn btn-default"
            href="/stats?experiment_id={{ experiment_id }}">Back to experiment</a>
     </form>

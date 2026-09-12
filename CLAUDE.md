@@ -182,6 +182,19 @@ Three things in `launch` follow from the loop, and the first is the one that bit
 There is deliberately **no batch column**. The run list is ordered `-created_at`, so a launch's
 rows are already adjacent, and a grouping key would be a mechanism with one producer.
 
+### A staged file can be taken back
+
+Each file in the list under the drop zone carries a **Remove**, and the form a **Reset** that
+clears the files and the accessions together, as a successful launch does. Per file, where the
+Import data page's control is per drop: reads are individual files, a breseq folder is
+hundreds. A removal is a splice of `selected` and a `renderList` -- the preview re-runs where
+one is drawn and `previewGeneration` discards one in flight for the longer list -- and both
+controls refuse while `uploading` is set, because `mutintUpload` holds its own copy of the list
+and a file removed meanwhile would go up anyway. The file input is reset after every pick so
+the same file can be picked again after being removed; a browser fires no `change` for a value
+it thinks is unchanged. The run list's **Took** column reads `1h 4m 12s`, every lower unit kept
+even at zero.
+
 ### The preview is a round trip, not a second copy of the rule
 
 `POST /breseq/preview` takes filenames -- no bytes, no session, no state -- and answers one row
