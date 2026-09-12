@@ -632,16 +632,15 @@ under it** — it cannot know what a component keeps. The `post_delete` receiver
 is the whole lifecycle, and because `BreseqRun.experiment` cascades, that receiver is also what
 makes deleting an *experiment* reach the reads and the report.
 
-A success deletes `reads/`, `trimmed/` and the output directory. A **failure keeps everything**,
-which is exactly when the reads matter.
-
-**Those bytes are counted, and not offered for clearing.** `storage.py` registers a
-`breseq_runs` kind with core's `storage_registry` -- measured over the directories the
-experiment's rows point at, with `clear=None`, because deleting the run is the one way to free
-a failed run's reads and a Clear that did the same thing would say less. The plugin calls
-`request_remeasure` wherever its files move: after a launch moves reads in, after a success's
-cleanup (the import's own rebuild measured the experiment *before* it), on failure, on
-cancellation, and on delete.
+Every ending deletes `reads/`, `trimmed/` and the output directory -- success through
+`cleanup_after_import`, failure and cancellation through `_discard_files`. A failure used to
+keep everything, on the reasoning that a failed run is exactly when the reads matter; what
+that kept in practice was gigabytes per failed run that nobody opened, because the log -- on
+the row and under the job -- is what a person reads. A run that has to be re-done is
+re-launched from its reads. The consequence for core's `storage_registry` is that this
+plugin registers **no** storage kind: a run directory holds nothing for longer than the run
+takes. (It registered one for a commit, measured over failed runs, until there were none to
+measure.)
 
 ---
 

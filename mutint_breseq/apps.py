@@ -28,17 +28,6 @@ class BreseqConfig(AppConfig):
                             requires_reference=True)
         register_about_section(self, name='mutint-breseq', version=__version__,
                                template='about/sections/mutint_breseq.html')
-        # The run directories, counted on the dashboard and the Overview and offered for
-        # nothing: a failed run keeps its reads on purpose, and deleting the run is how they
-        # are freed. See storage.py, and `request_remeasure` in tasks.py and views.py for
-        # where this plugin says its files moved.
-        from mutint_common.storage_registry import register_storage_kind
-        from mutint_breseq.storage import KIND, measure_runs
-        register_storage_kind(self, key=KIND, label='breseq run directories',
-                              measure=measure_runs,
-                              description="Reads and output kept by runs that failed. "
-                                          "Delete the run on the Run breseq page to free them.")
-
         # Nothing else is registered, and each absence is a decision:
         #
         # **No rebuilder.** This plugin derives nothing from the mutations -- it *makes* them,
@@ -48,6 +37,11 @@ class BreseqConfig(AppConfig):
         #
         # **No export handler.** It adds no mutation type; what it produces is ordinary
         # samples, exported by core's `mut` like any other.
+        #
+        # **No storage kind.** A run directory holds reads and breseq's output only while the
+        # run is going: every ending -- imported, failed, cancelled -- deletes them, so there
+        # is nothing of this plugin's on disk for `storage_registry` to count. It registered
+        # one for failed runs for a commit, until failed runs stopped keeping their files.
         #
         # **No import handler**, which is the one worth explaining because it looks like the
         # obvious way to build this. A FASTQ drop needs a sample name and a command line, and

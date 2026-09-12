@@ -272,8 +272,7 @@ def check_output(output_dir):
     for relative in REQUIRED_OUTPUT:
         if not os.path.isfile(os.path.join(output_dir, relative)):
             raise BreseqUnusable(
-                "breseq produced no %s. Its output is below; the run directory has been kept."
-                % relative)
+                "breseq produced no %s. Its output is below." % relative)
 
 
 def cleanup_after_import(run_dir, output_dir):

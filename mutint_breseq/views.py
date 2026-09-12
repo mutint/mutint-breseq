@@ -21,7 +21,6 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST
 
 import mutint_sample.views.common
-from mutint_common.storage_registry import request_remeasure
 from mutint_common import preferences, store
 from mutint_common.fileserve import serve_file
 from mutint_common.util import get_user_context
@@ -639,9 +638,6 @@ def launch(request):
     # that run's post_delete receiver owns. Nothing is left for core's reaper to be racing.
     if session is not None:
         staging.close(session)
-    # The reads just moved into the store under this experiment; say so, or the stored size
-    # stays where the last import left it until the run finishes.
-    request_remeasure(experiment.id, reason="breseq reads staged")
 
     for run in runs:
         # Through mutint_jobs rather than `task.enqueue` directly, which is what puts the run on
@@ -932,5 +928,4 @@ def run_delete(request, pk):
     # editor by somebody who means to.
     experiment = run.experiment
     run.delete()
-    request_remeasure(experiment.id, reason="breseq run %s deleted" % pk)
     return JsonResponse({"deleted": True, "runs": _run_rows(experiment)})

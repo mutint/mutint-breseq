@@ -291,7 +291,7 @@ class AccessionTestCase(TestCase):
 
     # --- the worker ---------------------------------------------------------------------
 
-    def test_a_checksum_failure_fails_the_run_with_the_sentence_and_keeps_the_directory(self):
+    def test_a_checksum_failure_fails_the_run_with_the_sentence_and_discards_the_reads(self):
         row = self._run()
         self.served["SRR1_2.fastq.gz"] = b"x" * len(self.served["SRR1_2.fastq.gz"])
         with no_delay(), self._ena(SRR1=[row]):
@@ -303,8 +303,9 @@ class AccessionTestCase(TestCase):
         self.assertEqual(run.status, STATUS_FAILED)
         self.assertIn("checksum", run.error)
         self.assertIn("SRR1_2.fastq.gz", run.error)
-        self.assertTrue(os.path.isdir(run.reads_dir()))
-        self.assertEqual(sorted(os.listdir(run.reads_dir())), ["SRR1_1.fastq.gz"])
+        # The file that did arrive goes with the rest: a failure discards its reads like
+        # every other ending, and the sentence on the row is what survives.
+        self.assertFalse(os.path.exists(run.reads_dir()))
         # The launch's own preflight is a dry run; nothing after it may have run breseq.
         with open(self.argv_record) as handle:
             calls = [json.loads(line) for line in handle if line.strip()]

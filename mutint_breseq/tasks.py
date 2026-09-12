@@ -27,7 +27,6 @@ from django.conf import settings
 from django.tasks import task
 from django.utils import timezone
 
-from mutint_common.storage_registry import request_remeasure
 from mutint_common import store
 from mutint_common.tools import ToolMissing
 from mutint_import import breseq_folder, import_lock, sra_fetch
@@ -70,12 +69,7 @@ def _timeout():
 
 
 def _cancelled(run, log=None):
-    """Record that somebody stopped this, and throw the work away.
-
-    **The one respect in which cancelled differs from failed**, which keeps everything: a
-    failure is something to diagnose and a cancellation is not. Somebody decided they did not
-    want this, so keeping gigabytes of half-finished analysis serves nobody.
-    """
+    """Record that somebody stopped this, and throw the work away."""
     run.status = STATUS_CANCELLED
     run.error = ""
     run.finished_at = timezone.now()
@@ -83,17 +77,28 @@ def _cancelled(run, log=None):
         run.log = log
     run.save(update_fields=["status", "error", "finished_at", "log"])
 
-    shutil.rmtree(run.reads_dir(), ignore_errors=True)
-    shutil.rmtree(run.trimmed_dir(), ignore_errors=True)
-    shutil.rmtree(run.output_dir(), ignore_errors=True)
-    request_remeasure(run.experiment_id, reason="breseq run %s cancelled" % run.pk)
+    _discard_files(run)
     logger.info("breseq run %s cancelled", run.pk)
 
 
-def _fail(run, message, log=None):
-    """Record why, keep the directory, and hand the exception on.
+def _discard_files(run):
+    """The reads, the trimmed reads and breseq's output. Every ending calls this.
 
-    `log` is stored as given: callers pass `_tail`'s answer, already cut to size.
+    A failure used to keep them, on the reasoning that a failed run is exactly when the reads
+    matter. What was kept in practice was gigabytes per failed run that nobody looked at,
+    because the log -- which survives on the row and under the job -- is what a person
+    actually reads. A run that has to be re-done is re-launched from the reads it came from.
+    """
+    shutil.rmtree(run.reads_dir(), ignore_errors=True)
+    shutil.rmtree(run.trimmed_dir(), ignore_errors=True)
+    shutil.rmtree(run.output_dir(), ignore_errors=True)
+
+
+def _fail(run, message, log=None):
+    """Record why, discard the files, and hand the exception on.
+
+    `log` is stored as given: callers pass `_tail`'s answer, already cut to size -- and the
+    log is what survives a failure, not the directory.
     """
     run.status = STATUS_FAILED
     run.error = message
@@ -101,9 +106,7 @@ def _fail(run, message, log=None):
     if log is not None:
         run.log = log
     run.save(update_fields=["status", "error", "finished_at", "log"])
-    # The directory is kept, and by now holds whatever breseq wrote before it stopped --
-    # which the last measurement, taken at launch, did not see.
-    request_remeasure(run.experiment_id, reason="breseq run %s failed" % run.pk)
+    _discard_files(run)
 
 
 def _tail(queue_id, run):
@@ -227,8 +230,8 @@ def _trim_reads(run, fastp, reads, paired, deadline, log, queue_id):
             is_cancelled=lambda: jobs.is_cancelled(queue_id), what="fastp")
         if returncode != 0:
             raise _FastpFailed(
-                "fastp exited %d on %s. Its output is in this job's log; the run directory "
-                "has been kept." % (returncode, names))
+                "fastp exited %d on %s. Its output is in this job's log."
+                % (returncode, names))
         for path in plan.read_set.files:
             replacement[path] = runner.trimmed_path(out_dir, path)
     return [replacement.get(path, path) for path in reads]
@@ -346,6 +349,13 @@ def run_breseq(context, run_id):
                 _fail(run, str(failed), log=_tail(queue_id, run))
                 raise
 
+        if not os.path.isdir(run.reads_dir()):
+            # Every ending discards the reads, so a run handed to a worker twice -- or one
+            # re-queued by hand after it failed -- has nothing to run on. A sentence rather
+            # than a traceback out of `listdir`.
+            _fail(run, "This run's reads are no longer on disk. Launch it again.",
+                  log=_tail(queue_id, run))
+            raise RuntimeError("run %s has no reads directory" % run.pk)
         reads = sorted(
             os.path.join(run.reads_dir(), name) for name in os.listdir(run.reads_dir()))
         # One budget for the whole run. fastp is minutes against breseq's hours, so it is not
@@ -464,8 +474,7 @@ def run_breseq(context, run_id):
     run.save(update_fields=["log"])
 
     if returncode != 0:
-        _fail(run, "breseq exited %d. Its output is below; the run directory has been kept."
-                   % returncode, log=output)
+        _fail(run, "breseq exited %d. Its output is below." % returncode, log=output)
         raise RuntimeError("breseq exited %d for run %s" % (returncode, run.pk))
 
     # breseq can stop having printed an error and still exit 0 -- a missing bowtie2 does
@@ -512,10 +521,6 @@ def run_breseq(context, run_id):
     # Everything worth keeping -- data/'s four files and breseq's HTML report -- is already in
     # the store under the sample, put there by the importer above.
     runner.cleanup_after_import(run.directory(), run.output_dir())
-    # The import's own rebuild measured this experiment *before* the cleanup, with the
-    # reads, the trimmed reads and breseq's output all still here; without this the stored
-    # size is too high by all of that until something else remeasures.
-    request_remeasure(run.experiment_id, reason="breseq run %s imported" % run.pk)
 
     run.status = STATUS_IMPORTED
     run.sample = sample

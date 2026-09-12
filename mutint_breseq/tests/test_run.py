@@ -95,6 +95,13 @@ class RunTestCase(TestCase):
                     handle.write(content)
         return session
 
+    def _restore_reads(self, run, names=("s1_R1.fastq", "s1_R2.fastq")):
+        """Put a run's reads back after an ending discarded them, for a test that re-runs
+        the task against the same row."""
+        root = store.ensure_dir(run.reads_dir())
+        for name in names:
+            fastq_fixture.write(os.path.join(root, name), count=4)
+
     def _launch(self, sample="s1", population="", time_point="", arguments="",
                 names=("s1_R1.fastq", "s1_R2.fastq"), trim_reads=None, content=None,
                 population_sample=None, coverage_limit=None, input_mode=None,
@@ -189,9 +196,9 @@ class RunTestCase(TestCase):
         one that accepted the launch, and it is what catches a worker whose breseq is not the
         one the web host asked.
         """
-        # Launched so that it *fails*, because a successful run imports and
-        # `cleanup_after_import` takes the reads with it -- and this needs a run directory
-        # still standing to re-run the task against.
+        # Launched so that it *fails* -- a successful run imports the sample, which this
+        # must not have done -- and then given its reads back, because every ending discards
+        # them and this needs a run directory standing to re-run the task against.
         os.environ["FAKE_BRESEQ_FAIL"] = "3"
         self.assertEqual(self._launch().status_code, 200)
         os.environ.pop("FAKE_BRESEQ_FAIL", None)
@@ -199,6 +206,7 @@ class RunTestCase(TestCase):
         run = BreseqRun.objects.get()
         run.status, run.error, run.log = STATUS_QUEUED, "", ""
         run.save(update_fields=["status", "error", "log"])
+        self._restore_reads(run)
         os.remove(self.argv_record)
         os.remove(self.fastp_record)
 
@@ -214,7 +222,7 @@ class RunTestCase(TestCase):
         self.assertEqual([], self._recorded_fastp(), "reads were trimmed anyway")
         self.assertEqual([], [call for call in self._recorded_breseq()
                               if not call["dry_run"]], "breseq ran anyway")
-        self.assertTrue(os.path.isdir(run.reads_dir()), "a failure keeps the reads")
+        self.assertFalse(os.path.exists(run.reads_dir()), "a failure kept the reads")
 
     # --- the log ------------------------------------------------------------------------
 
@@ -445,7 +453,7 @@ class RunTestCase(TestCase):
         self.assertIn("not a FASTQ", run.log)
         self.assertEqual("aligned.sam", os.path.basename(self._recorded_argv()["argv"][-1]))
 
-    def test_fastp_failing_fails_the_run_and_keeps_the_directory(self):
+    def test_fastp_failing_fails_the_run_and_discards_the_reads(self):
         os.environ["FAKE_FASTP_FAIL"] = "2"
         self.addCleanup(os.environ.pop, "FAKE_FASTP_FAIL", None)
         self.assertEqual(self._launch().status_code, 200)
@@ -454,7 +462,8 @@ class RunTestCase(TestCase):
         self.assertEqual(run.status, STATUS_FAILED)
         self.assertIn("fastp exited 2", run.error)
         self.assertIn("adapter detection failed", run.log)
-        self.assertTrue(os.path.isdir(run.reads_dir()))
+        self.assertFalse(os.path.exists(run.reads_dir()))
+        self.assertFalse(os.path.exists(run.trimmed_dir()))
         # breseq was never started **for real**. The preflight ran it before trimming, so the
         # record exists; what must not be there is a call without `--dry-run`.
         self.assertTrue(self._recorded_dry_runs(), "the preflight never ran")
@@ -839,7 +848,7 @@ class RunTestCase(TestCase):
 
     # --- failure --------------------------------------------------------------------------
 
-    def test_a_nonzero_exit_is_recorded_and_the_directory_kept(self):
+    def test_a_nonzero_exit_is_recorded_and_the_files_discarded(self):
         os.environ["FAKE_BRESEQ_FAIL"] = "3"
         self.addCleanup(os.environ.pop, "FAKE_BRESEQ_FAIL", None)
 
@@ -854,8 +863,10 @@ class RunTestCase(TestCase):
         self.assertIn("exited 3", run.error)
         # The log is what a person actually needs, and it has to survive the failure.
         self.assertIn("something went wrong", run.log)
-        # Kept, so the run can be looked at. A failed run is exactly when the files matter.
-        self.assertTrue(os.path.isdir(run.reads_dir()))
+        # The log is kept and the files are not: a failure cleans up the way a success and a
+        # cancellation do. What a person reads after a failure is the log.
+        self.assertFalse(os.path.exists(run.reads_dir()))
+        self.assertFalse(os.path.exists(run.output_dir()))
         self.assertIsNone(run.sample)
 
     def test_output_breseq_did_not_finish_writing_is_named(self):
@@ -926,9 +937,27 @@ class RunTestCase(TestCase):
         self.addCleanup(os.environ.pop, "FAKE_BRESEQ_FAIL", None)
         self._launch()
         run = BreseqRun.objects.get()
+        self._restore_reads(run)
 
         with self.assertRaises(RuntimeError):
             tasks.run_breseq.call(None, run.pk)
+
+    def test_a_run_whose_reads_are_gone_fails_with_a_sentence(self):
+        """Every ending discards the reads, so a row handed to a worker twice has nothing to
+        run on -- and says so on the row rather than in a traceback."""
+        from mutint_breseq import tasks
+
+        os.environ["FAKE_BRESEQ_FAIL"] = "3"
+        self.addCleanup(os.environ.pop, "FAKE_BRESEQ_FAIL", None)
+        self._launch()
+        run = BreseqRun.objects.get()
+        self.assertFalse(os.path.exists(run.reads_dir()))
+
+        with self.assertRaises(RuntimeError):
+            tasks.run_breseq.call(None, run.pk)
+        run.refresh_from_db()
+        self.assertEqual(STATUS_FAILED, run.status)
+        self.assertIn("no longer on disk", run.error)
 
     def test_a_run_deleted_before_the_worker_reaches_it_is_not_an_error(self):
         from mutint_breseq import tasks
