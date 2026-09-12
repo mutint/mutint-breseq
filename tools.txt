@@ -36,7 +36,7 @@
 # fresh `env/tools` and then never moved again: the spec was already satisfied, so micromamba
 # was never asked. The entry script fingerprints the *spec list* (`env/tools/.installed`), so
 # editing the hash below is what makes the next `./mutint start` install the new breseq --
-# here, and on an installation, through `/upgrade/`, which is applied before that fingerprint
+# here, and on an installation, through `/update/`, which is applied before that fingerprint
 # is read.
 #
 # **Moving it backwards can fail to solve** in an existing prefix, where breseq's own
@@ -49,7 +49,7 @@
 # so `tool_path("breseq")` is not sufficient on its own: the subprocess needs env/tools/bin
 # on PATH or breseq stops with `Required executable "bowtie2" not found`, having exited 0.
 # mutint_breseq/runner.py `tool_environment()` is what builds that PATH.
-https://barricklab.github.io/conda/::breseq-prerelease=*=g23736ada
+https://barricklab.github.io/conda/::breseq-prerelease=*=gab1f4511
 
 # fastp trims adapters off the reads before breseq sees them, when a run asks for it -- which
 # is the default. bioconda has it, so no channel prefix; `--detect_adapter_for_pe` has been in
