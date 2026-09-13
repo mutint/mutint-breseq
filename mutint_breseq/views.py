@@ -31,6 +31,7 @@ from mutint_experiment.permissions import (
     experiment_lock_refusal,
 )
 from mutint_common.tools import ToolMissing
+from mutint_import import metadata
 from mutint_import import accessions, reference_store, sample_names, sra, sra_fetch, staging
 from mutint_jobs import jobs as jobs_api
 from mutint_jobs import processes
@@ -62,16 +63,16 @@ SAMPLE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+ -]{0,99}$")
 
 MAX_ARGUMENTS_CHARS = 2000
 
-#: How the form said what this sample is called. Three shapes of the same question, and the
-#: menu on the page is the only thing that decides between them.
+#: How the form said what the samples are called: Single sample (`parts`, a coordinate the
+#: server composes) or Multiple samples (`read_names`, derived per read file set, or taken
+#: from a metadata.csv). A third, `name` -- the name typed whole and stored verbatim -- went:
+#: it was the composed name's preview made editable, and a stored preference naming it is
+#: answered with a 400 here and normalised to `parts` by the page.
 #:
-#: `MODE_PARTS` is the default because it is the contract every existing caller posts, and
-#: because a mode nobody named should be the one that composes rather than the one that trusts
-#: a string.
-MODE_NAME = "name"
+#: `MODE_PARTS` is the default because it is the contract every existing caller posts.
 MODE_PARTS = "parts"
 MODE_READ_NAMES = "read_names"
-INPUT_MODES = (MODE_NAME, MODE_PARTS, MODE_READ_NAMES)
+INPUT_MODES = (MODE_PARTS, MODE_READ_NAMES)
 
 
 #: Which way in this reader used last. One key rather than one per experiment: which half of
@@ -304,8 +305,8 @@ PREFLIGHT_TIMEOUT_SECONDS = 60
 def _check_name_is_usable(name, field):
     """Raise SampleNameError unless `name` can be this sample's name and its directory.
 
-    The one check both single-sample modes share, and the only thing standing between a typed
-    string and a path under the store.
+    The one check every name passes, and the only thing standing between a typed string
+    and a path under the store.
     """
     if not SAMPLE_NAME_RE.match(name):
         if len(name) > 100:
@@ -321,33 +322,17 @@ def _check_name_is_usable(name, field):
     return name
 
 
-def _single_sample_name(mode, payload):
-    """The one sample's name, from whichever half of the form was filled in.
+def _single_sample_name(payload):
+    """The one sample's name, composed from the population, time point and sample posted.
 
-    **The two modes take different contracts, and that is the point of having modes.**
-
-    `MODE_PARTS` posts a population, a time point and a sample, and
     `sample_names.compose_sample_name` decides how the three become one string -- so that
     convention can change without this form changing with it, and the composer refuses the
-    combinations no name can spell while saying which field is at fault.
-
-    `MODE_NAME` posts the name itself and it is stored **verbatim**. Composing it would mean
-    rebuilding a name from the coordinate read out of it, which is not a round trip: `3-30000-1-1`
-    parses to population 3, time point 30000, label `1-1` and composes back to `3_30000_1-1`,
-    so a person who typed a perfectly good A-F-I-R name got a different one. A mode called
-    *metadata from a name* has to leave the name alone; the coordinate is read from it by the
-    importer exactly as it would be from a dropped folder of that name.
+    combinations no name can spell while saying which field is at fault. A mode that posted
+    the name whole and stored it verbatim stood beside this one and went with it: the
+    composed name is shown read-only on the page, which is what that mode was for.
     """
-    if mode == MODE_NAME:
-        name = (payload.get("sample_name") or "").strip()
-        if not name:
-            raise sample_names.SampleNameError("sample_name", "A sample name is required.")
-        return _check_name_is_usable(name, "sample_name")
-
     name = sample_names.compose_sample_name(
         payload.get("population"), payload.get("time_point"), payload.get("sample"))
-    # The composer keeps each part inside this pattern, so reaching here means the parts were
-    # individually fine and the whole is not -- a name past 100 characters.
     return _check_name_is_usable(name, "sample")
 
 
@@ -441,7 +426,7 @@ def _preflight(experiment, arguments, polymorphism=False, coverage_limit=None):
 def launch(request):
     """Take a staged drop, a list of SRA accessions, or both, and start a run.
 
-    Body: {upload_id, accessions, input_mode, sample_name | population, time_point, sample,
+    Body: {upload_id, accessions, input_mode, population, time_point, sample, metadata,
     arguments, trim_reads, population_sample, coverage_limit}; `trim_reads` defaults to true,
     `population_sample` to false, and `coverage_limit` is blank for every read. `upload_id`
     is blank when nothing was dropped -- the page opens no session for a launch that has no
@@ -481,9 +466,14 @@ def launch(request):
 
     if mode != MODE_READ_NAMES:
         try:
-            sample_name = _single_sample_name(mode, payload)
+            sample_name = _single_sample_name(payload)
         except sample_names.SampleNameError as refusal:
             return JsonResponse({"error": str(refusal), "field": refusal.field}, status=400)
+
+    try:
+        placement = _metadata(payload)
+    except metadata.MetadataError as refusal:
+        return JsonResponse({"error": str(refusal), "field": "metadata"}, status=400)
 
     arguments = (payload.get("arguments") or "").strip()
     if len(arguments) > MAX_ARGUMENTS_CHARS:
@@ -571,13 +561,25 @@ def launch(request):
              "field": "upload"}, status=409)
 
     # The plan: one (sample, its files, the accession plans whose runs are its) per run row.
-    # In the two single-sample modes everything -- dropped and fetched alike -- is that one
+    # Under Single sample everything -- dropped and fetched alike -- is that one
     # sample's reads; in read-names mode each accession is a sample of its own beside the
     # samples the dropped names derive, named by ENA's alias or by the accession.
+    # Per-sample Population sample flags a metadata.csv row set; the form's checkbox is the
+    # default for every run the file did not speak about.
+    population_by_name = {}
     if mode == MODE_READ_NAMES:
         paired = "--no-paired-mapping" not in runner.split_arguments(arguments)
         plan = []
-        for sample in read_names.derive_samples(sorted(staged), paired=paired):
+        try:
+            named = _apply_metadata(read_names.derive_samples(sorted(staged), paired=paired),
+                                    placement)
+        except metadata.MetadataError as refusal:
+            abandon()
+            return JsonResponse({"error": str(refusal), "field": "metadata"}, status=400)
+        for sample, _named_by, problem, is_clonal in named:
+            if problem:
+                abandon()
+                return JsonResponse({"error": problem, "field": "metadata"}, status=400)
             try:
                 _check_name_is_usable(sample.name, "upload")
             except sample_names.SampleNameError as refusal:
@@ -586,6 +588,9 @@ def launch(request):
                     {"error": "%s could not be a sample name: %s" % (sample.name, refusal),
                      "field": "upload"}, status=400)
             plan.append((sample, []))
+            if is_clonal is not None:
+                # The row's word for this sample outranks the form's one checkbox.
+                population_by_name[sample.name] = not is_clonal
         plan.extend(_accession_samples(plans))
         clash = _name_clash(plan)
         if clash:
@@ -611,7 +616,7 @@ def launch(request):
                 sample_name=sample.name,
                 arguments=arguments,
                 trim_reads=bool(payload.get("trim_reads", True)),
-                population_sample=population_sample,
+                population_sample=population_by_name.get(sample.name, population_sample),
                 coverage_limit=coverage_limit,
                 accessions=plan_dicts,
                 status=STATUS_QUEUED)
@@ -731,15 +736,70 @@ def preview(request):
     except (accessions.AccessionError, sra_fetch.FetchError) as refusal:
         return JsonResponse({"error": str(refusal), "field": "accessions"}, status=400)
 
+    try:
+        placement = _metadata(payload)
+        named = _apply_metadata(read_names.derive_samples(sorted(flat), paired=paired),
+                                placement)
+    except metadata.MetadataError as refusal:
+        return JsonResponse({"error": str(refusal), "field": "metadata"}, status=400)
+
     existing = _existing_samples(experiment)
     rows = []
-    for sample in read_names.derive_samples(sorted(flat), paired=paired):
-        rows.append(_preview_row(existing, sample))
+    for sample, named_by, problem, is_clonal in named:
+        row = _preview_row(existing, sample)
+        if named_by:
+            row["named_by"] = named_by
+        if problem:
+            row["error"] = problem
+        if is_clonal is not None:
+            row["population_sample"] = not is_clonal
+        rows.append(row)
     for sample, plan_dicts in _accession_samples(plans):
         row = _preview_row(existing, sample)
         row.update(_accession_detail(plan_dicts))
         rows.append(row)
     return JsonResponse({"samples": rows})
+
+
+def _metadata(payload):
+    """The posted `metadata` text as core's `Metadata`, or None for nothing posted."""
+    text = payload.get("metadata") or ""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    return metadata.parse(text, source="metadata.csv")
+
+
+def _apply_metadata(samples, placement):
+    """Rename the derived samples a metadata.csv row covers.
+
+    Returns `[(sample, named_by, problem, is_clonal)]` in the derivation's order; `is_clonal`
+    is the row's `sample_type` (True for a clone, False for a population, None unsaid),
+    which sets that run's own Population sample flag over the form's checkbox. A row matches a
+    sample when it names any of its files, exactly or as a stem the file starts with or
+    contains; the name becomes `compose_sample_name` of the row, so the importer reads the
+    coordinate back out of it exactly as it would from a dropped folder. A row that composes
+    to nothing usable is a `problem` on that sample rather than a refusal of the drop, so the
+    preview can show it beside the rest. Accession samples are not renamed: their files are
+    ENA's names, and a row naming a run is a later feature.
+    """
+    named = []
+    for sample in samples:
+        if placement is None:
+            named.append((sample, None, None, None))
+            continue
+        row = placement.lookup_stem(list(sample.files))
+        if row is None:
+            named.append((sample, None, None, None))
+            continue
+        try:
+            name = sample_names.compose_sample_name(row.population, row.time_point, row.sample)
+        except sample_names.SampleNameError as refusal:
+            named.append((sample, "metadata",
+                          "metadata.csv line %d: %s" % (row.line, refusal), row.is_clonal))
+            continue
+        named.append((read_names.DerivedSample(name, sample.files), "metadata", None,
+                      row.is_clonal))
+    return named
 
 
 def _preview_row(existing, sample):
@@ -874,6 +934,10 @@ def _staged_files(staged_root):
     for dirpath, _dirnames, filenames in os.walk(staged_root):
         for filename in sorted(filenames):
             source = os.path.join(dirpath, filename)
+            # A metadata.csv that reached the staging area is not a read file. The page
+            # keeps it out of the upload; this keeps a drop from a client that did not.
+            if metadata.is_metadata_file(source):
+                continue
             found[_flat_name(staged_root, source)] = source
     return found
 

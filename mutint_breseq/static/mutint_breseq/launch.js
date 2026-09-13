@@ -234,6 +234,14 @@
     // file removed meanwhile would still go up and the page would lie about what is going;
     // Remove and Reset refuse while this is set, as the Import data page's do.
     var uploading = false;
+    // A dropped metadata.csv, read client-side and posted with the preview and the launch
+    // rather than uploaded with the reads: the server parses it with core's own reader
+    // (`mutint_import.metadata`) and names the samples from it under Multiple samples.
+    var metadataText = "";
+    var metadataName = "";
+    // The last preview's answer, keyed on everything it depends on, so a submit can ask for
+    // a fresh one only when something changed. See `ensurePreview`.
+    var lastPreview = null;
     var dropzone = document.getElementById("breseq-dropzone");
     var fileInput = document.getElementById("breseq-file-input");
     var fileListEl = document.getElementById("breseq-file-list");
@@ -351,7 +359,6 @@
             "info");
     }
 
-    nameInput.addEventListener("input", splitFromName);
     // Re-read on blur so the boxes show the *name's* reading rather than what was typed into
     // them: put an underscore in Population and the composed name has four fields and carries
     // no coordinate, which the boxes then say instead of pretending it worked.
@@ -362,19 +369,12 @@
 
     // --- the Input type menu ------------------------------------------------------------
     //
-    // Three ways of saying what a sample is called, and the menu decides which one is being
-    // used. Two things follow, and the second is the whole reason the modes exist:
-    //
-    //   - **what shows**: every element carrying `data-mode-show` lists the modes it belongs
-    //     to, so the markup says where it appears and this does not have to hold a list;
-    //   - **which side is authoritative**: in `name` the Full Name box is typed into and the
-    //     three parts are disabled, showing what it will be read as; in `parts` it is the
-    //     other way round. The sync that fills the disabled side in is the one that was
-    //     already there.
-    //
-    // A disabled input posts nothing and cannot be typed into, which is exactly "read-only
-    // unless you switch to that version of the form". `readonly` would have been the other
-    // choice and looks identical while still being focusable and still submitting.
+    // Two ways of saying what the samples are called, and the menu decides which: Single
+    // sample composes a name from three boxes, Multiple samples derives one per read file
+    // set (or takes them from a dropped metadata.csv). Every element carrying
+    // `data-mode-show` lists the modes it belongs to, so the markup says where it appears
+    // and this does not have to hold a list. The composed name is shown disabled: a
+    // disabled input posts nothing and cannot be typed into, which is exactly "a preview".
 
     var modeInput = document.getElementById("breseq-input-mode");
     var nameHelp = document.getElementById("breseq-name-help");
@@ -384,13 +384,13 @@
         embedded: CONFIG.preferences || {}
     });
     var MODE_KEY = "breseq.input_mode";
-    var MODES = ["name", "parts", "read_names"];
+    // `parts` is Single sample and `read_names` is Multiple samples; the values are what
+    // every stored preference holds, so only the labels changed when a third mode went.
+    var MODES = ["parts", "read_names"];
 
     var NAME_HELP = {
-        name: "What this sample is called everywhere in MutInt. The three boxes below show " +
-              "how it will be read; switch to the other input type to set them yourself.",
-        parts: "Built from the three boxes below. Switch to the other input type to type a " +
-               "name instead."
+        parts: "Built from the three boxes above. This is the sample's name in MutInt and " +
+               "the directory breseq writes into."
     };
 
     function currentMode() {
@@ -406,16 +406,15 @@
                 el.hidden = modes.indexOf(mode) === -1;
             });
 
-        // The half that is not being filled in is disabled rather than hidden: seeing what a
-        // name means is the point of mode `name`, and seeing the name three parts will make is
-        // worth the same in reverse.
-        nameInput.disabled = mode !== "name";
+        // The composed name is read-only always: it is a preview of what the three boxes
+        // make, kept in the markup as disabled and never enabled here.
+        nameInput.disabled = true;
         [populationInput, timePointInput, sampleInput].forEach(function (input) {
             input.disabled = mode !== "parts";
         });
         nameHelp.textContent = NAME_HELP[mode] || "";
 
-        if (mode === "name") { splitFromName(); } else if (mode === "parts") { composeFromParts(); }
+        if (mode === "parts") { composeFromParts(); }
         renderList();
     }
 
@@ -477,14 +476,25 @@
     // folder being hundreds of files). The path rides in a data attribute rather than an
     // inline handler -- filenames are the person's own text -- and one delegated listener
     // below reads it back.
+    function removeButton(path) {
+        return "<button type=\"button\" class=\"btn btn-link btn-xs breseq-remove\"" +
+               " data-path=\"" + esc(path) + "\"" + (uploading ? " disabled" : "") +
+               ">Remove</button>";
+    }
+
     function fileListHtml() {
-        return "<ul>" + selected.map(function (entry) {
+        var items = selected.map(function (entry) {
             return "<li>" + esc(entry.path) + " <small style='color: #666;'>" +
-                   humanBytes(entry.file.size) + "</small> " +
-                   "<button type=\"button\" class=\"btn btn-link btn-xs breseq-remove\"" +
-                   " data-path=\"" + esc(entry.path) + "\"" +
-                   (uploading ? " disabled" : "") + ">Remove</button></li>";
-        }).join("") + "</ul>";
+                   humanBytes(entry.file.size) + "</small> " + removeButton(entry.path) + "</li>";
+        });
+        if (metadataText) {
+            items.push("<li>" + esc(metadataName) +
+                       " <small style='color: #666;'>sample names and coordinates" +
+                       (currentMode() === "read_names"
+                           ? "" : "; used under Multiple samples only") +
+                       "</small> " + removeButton(metadataName) + "</li>");
+        }
+        return "<ul>" + items.join("") + "</ul>";
     }
 
     // A removal is a splice and a redraw: `renderList` already re-runs the preview where one
@@ -492,6 +502,10 @@
     // list. Refused mid-upload for the reason `uploading` gives.
     function removeEntry(path) {
         if (uploading) { return; }
+        if (metadataText && path === metadataName) {
+            metadataText = "";
+            metadataName = "";
+        }
         selected = selected.filter(function (entry) { return entry.path !== path; });
         renderList();
     }
@@ -503,6 +517,8 @@
     function resetSelection() {
         if (uploading) { return; }
         selected = [];
+        metadataText = "";
+        metadataName = "";
         if (accessionsEl) { accessionsEl.value = ""; }
         fileInput.value = "";
         renderList();
@@ -570,26 +586,48 @@
     // check that the two specifications match, never that this implementation matches its own
     // table. That copy earns its place because a name box needs an answer per keystroke; a
     // file drop is a discrete event and can afford a round trip.
+    // Everything the preview's answer depends on, as one string, so a cached answer is
+    // known to be for the selection on screen and not for the one before it.
+    function previewKey() {
+        return JSON.stringify([currentMode(),
+                               selected.map(function (entry) { return entry.path; }),
+                               accessionsText(), argsInput.value, metadataText]);
+    }
+
+    // The preview's samples, from the cache when nothing changed since it was drawn, else
+    // freshly asked. What the submit-time dialog reads: a launch decides on what the server
+    // says the selection is, never on a table from an earlier state of it.
+    function ensurePreview() {
+        if (lastPreview && lastPreview.key === previewKey()) {
+            return Promise.resolve(lastPreview.samples);
+        }
+        return renderPreview();
+    }
+
     function renderPreview() {
         previewGeneration += 1;
         var mine = previewGeneration;
         var names = selected.map(function (entry) { return entry.path; });
         var typed = accessionsText();
         var readNames = currentMode() === "read_names";
+        var key = previewKey();
+        lastPreview = null;
 
         fileListEl.innerHTML = fileListHtml() +
             '<p style="color: #666; margin-top: 1em;">' +
             (typed ? "Asking ENA about the accessions…" : "Reading the names…") + "</p>";
 
-        mutintPostJson("/breseq/preview?experiment_id=" + EXPERIMENT_ID,
-                       { names: names, accessions: typed, arguments: argsInput.value })
+        return mutintPostJson("/breseq/preview?experiment_id=" + EXPERIMENT_ID,
+                              { names: names, accessions: typed, arguments: argsInput.value,
+                                metadata: metadataText })
             .then(function (body) {
-                if (mine !== previewGeneration) { return; }
+                if (mine !== previewGeneration) { return lastPreview ? lastPreview.samples : []; }
                 var samples = body.samples || [];
+                lastPreview = { key: key, samples: samples };
                 if (!readNames) {
                     // One sample whatever was given; only the accessions need describing.
                     fileListEl.innerHTML = fileListHtml() + accessionListHtml(samples);
-                    return;
+                    return samples;
                 }
                 var sources = [];
                 if (names.length) {
@@ -603,9 +641,10 @@
                     "<p><b>" + samples.length + "</b> sample" +
                     (samples.length === 1 ? "" : "s") + " from " + sources.join(" and ") +
                     ":</p>" + previewHtml(samples);
+                return samples;
             })
             .catch(function (err) {
-                if (mine !== previewGeneration) { return; }
+                if (mine !== previewGeneration) { return []; }
                 // The launch derives the names and resolves the accessions itself, so a
                 // preview that could not be fetched costs the reader a description and not
                 // the ability to launch -- except that an accession ENA refused here will be
@@ -615,14 +654,19 @@
                     (err.body && err.body.field === "accessions"
                         ? "" : "Could not work out what these files will be called: ") +
                     esc(err.message || String(err)) + "</p>";
+                // Resolved, not rejected: a launch does not wait on the preview, and the
+                // server refuses at launch whatever the preview would have refused.
+                return [];
             });
     }
 
     function renderList() {
         var typed = accessionsText();
         submitBtn.disabled = !selected.length && !typed;
-        if (resetBtn) { resetBtn.disabled = uploading || (!selected.length && !typed); }
-        if (!selected.length && !typed) { fileListEl.innerHTML = ""; return; }
+        if (resetBtn) {
+            resetBtn.disabled = uploading || (!selected.length && !typed && !metadataText);
+        }
+        if (!selected.length && !typed) { fileListEl.innerHTML = fileListHtml(); return; }
         // The table is drawn whenever an accession is typed, whatever the mode: what an
         // accession resolved to is worth seeing before the download is committed to.
         if (currentMode() === "read_names" || typed) { renderPreview(); return; }
@@ -630,8 +674,14 @@
         fileListEl.innerHTML = fileListHtml();
     }
 
+    function isMetadata(path) {
+        return path.split("/").pop().toLowerCase() === "metadata.csv";
+    }
+
     function addEntries(entries) {
+        var csv = null;
         entries.forEach(function (entry) {
+            if (isMetadata(entry.path)) { csv = entry; return; }
             // A second drop adds to the first rather than replacing it, so a pair whose mates
             // live in different folders can be assembled in two gestures. Same path twice is
             // the same file.
@@ -639,6 +689,17 @@
                 selected.push(entry);
             }
         });
+        if (csv) {
+            // Read here and posted as text with the preview and the launch: it is about the
+            // reads rather than one of them, and the server has no reason to store it.
+            var reader = new FileReader();
+            reader.onload = function () {
+                metadataText = String(reader.result || "");
+                metadataName = csv.path;
+                renderList();
+            };
+            reader.readAsText(csv.file);
+        }
         renderList();
     }
 
@@ -711,6 +772,36 @@
             return;
         }
         submitBtn.disabled = true;
+        // Under Single sample every read file, dropped or fetched, becomes one breseq run
+        // and one sample. Accessions that resolve to several SRA samples are the case
+        // somebody almost never means that way, so it is asked -- on a fresh preview, since
+        // the one on screen may predate the last edit of the box. A preview that cannot be
+        // fetched lets the launch go on: the server refuses whatever it would have.
+        var confirmed = Promise.resolve(true);
+        if (currentMode() === "parts" && accessionsText()) {
+            confirmed = ensurePreview().then(function (samples) {
+                var distinct = {};
+                (samples || []).forEach(function (row) {
+                    if (row.accession) { distinct[row.biosample || row.accession] = true; }
+                });
+                var count = Object.keys(distinct).length;
+                if (count < 2) { return true; }
+                return window.mutintConfirm(
+                    "Run these reads as one sample?",
+                    "The accessions resolve to " + count + " different SRA samples. Under " +
+                    "Single sample every read file, dropped or fetched, is combined into " +
+                    "one breseq run and one sample. Choose Multiple samples if each " +
+                    "accession should be its own sample.",
+                    "Run as one sample");
+            });
+        }
+        confirmed.then(function (go) {
+            if (!go) { submitBtn.disabled = false; return; }
+            startUpload();
+        });
+    });
+
+    function startUpload() {
         uploading = true;
         renderList();                     // greys every Remove and the Reset
         setProgress(0, 1, "Preparing…");
@@ -732,14 +823,13 @@
             return mutintPostJson("/breseq/launch?experiment_id=" + EXPERIMENT_ID, {
                 upload_id: uploadId,
                 accessions: accessionsText(),
-                // **The mode decides what naming the server is being handed**, and the three
-                // are genuinely different contracts rather than one with optional fields:
-                // `parts` posts a coordinate for the server to compose, `name` posts the name
-                // itself and it is stored as typed, `read_names` posts nothing about names at
-                // all. Everything is sent every time and the server reads what its mode says
-                // to; the fields the mode does not use are from a disabled input and empty.
+                // **The mode decides what naming the server is being handed**, and the two
+                // are different contracts rather than one with optional fields: `parts`
+                // posts a coordinate for the server to compose, `read_names` posts nothing
+                // about names -- the read files, and a metadata.csv if one was dropped, say.
+                // Everything is sent every time and the server reads what its mode says to.
                 input_mode: currentMode(),
-                sample_name: nameInput.value,
+                metadata: metadataText,
                 population: populationInput.value,
                 time_point: timePointInput.value,
                 sample: sampleInput.value,
@@ -758,6 +848,8 @@
             // common case the one that costs the most typing. The Sample box is the thing to
             // change before the next drop, and it is left in view rather than emptied.
             selected = [];
+            metadataText = "";
+            metadataName = "";
             // The accessions go with the files, and for the same reason: they are the run's
             // input, and left in the box the next press would supersede the run just launched.
             if (accessionsEl) { accessionsEl.value = ""; }
@@ -781,12 +873,19 @@
             uploading = false;
             renderList();
         });
-    });
+    }
 
     // **Last, and it has to be.** `syncInputMode` calls `renderList`, which reads the file
     // list and the submit button -- `var`s assigned further down this function. Hoisting
     // declares them and does not assign them, so an init call placed beside the menu's own
     // wiring would run against `undefined` and throw before the page had drawn anything.
-    modeInput.value = prefs.get(MODE_KEY, "parts");
+    // A stored mode the menu no longer offers -- the retired name mode -- falls back to
+    // Single sample and is written back, so the row stops carrying a value nothing reads.
+    var storedMode = prefs.get(MODE_KEY, "parts");
+    if (MODES.indexOf(storedMode) === -1) {
+        storedMode = "parts";
+        prefs.set(MODE_KEY, storedMode);
+    }
+    modeInput.value = storedMode;
     syncInputMode();
 }());

@@ -157,10 +157,10 @@ class AccessionTestCase(TestCase):
         argv = self._recorded_argv()
         self.assertTrue(any(arg.endswith("SRR1_1.fastq.gz") for arg in argv), argv)
 
-    def test_a_dropped_pair_and_an_accession_are_one_sample_in_name_mode(self):
+    def test_a_dropped_pair_and_an_accession_are_one_sample_under_single_sample(self):
         with no_delay(), self._ena(SRR1=[self._run()]):
             response = self._launch("SRR1", names=("s1_R1.fastq", "s1_R2.fastq"),
-                                    input_mode="name", sample_name="s1")
+                                    input_mode="parts", sample="s1")
 
         self.assertEqual(response.status_code, 200, response.content)
         run = BreseqRun.objects.get()
@@ -315,7 +315,7 @@ class AccessionTestCase(TestCase):
     def test_the_sample_records_the_run_as_one_sra_input_and_dropped_files_as_reads(self):
         with no_delay(), self._ena(SRR1=[self._run()]):
             self._launch("SRR1", names=("s1_R1.fastq", "s1_R2.fastq"),
-                         input_mode="name", sample_name="s1")
+                         input_mode="parts", sample="s1")
 
         sample = Sample.objects.get(pk=BreseqRun.objects.get().sample_id)
         by_kind = {}

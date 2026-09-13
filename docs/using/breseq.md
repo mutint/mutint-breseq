@@ -32,7 +32,7 @@ breseq, and every run fails identically.
 ## Launching a run
 
 1. Open the experiment's **Import data** page and choose the **Run breseq** tab.
-2. Choose an **Input type** and name the sample &mdash; see *Three ways to name a sample* below.
+2. Choose an **Input type** and name the sample &mdash; see *Two ways to name a sample* below.
 3. Select **Population sample** if these reads are a whole population rather than a clone.
 4. Optionally select **Limit read-depth coverage** and name a fold coverage. Left deselected,
    every read is used; 60&ndash;80 is recommended for clonal samples.
@@ -43,7 +43,7 @@ breseq, and every run fails identically.
 
 Everything you drop or name is one sample's reads — both mates of a pair, or several lanes,
 or a run fetched from the archive beside a file of your own. To analyze a second sample,
-launch again; or choose the third input type, under which each file set and each accession is
+launch again; or choose **Multiple samples**, under which each file set and each accession is
 a sample of its own.
 
 ## Reads from the SRA
@@ -65,9 +65,11 @@ configuring. A run ENA has no FASTQ for — one submitted as an alignment, or on
 mirrored from NCBI — is refused with a sentence naming it; the archive usually catches up
 within a few days.
 
-**What an accession is called.** Under the first two input types, an accession's reads join
-the one sample you named, exactly as a dropped file would. Under *metadata from read names*,
-each accession is a sample of its own, and it is called what its submitter called it — ENA's
+**What an accession is called.** Under **Single sample**, an accession's reads join the one
+sample you named, exactly as a dropped file would -- and if the accessions you typed resolve
+to more than one SRA sample, the page asks before launching whether you really mean them as
+one, pointing at Multiple samples. Under **Multiple samples**, each accession is a sample of
+its own, and it is called what its submitter called it — ENA's
 *sample alias*, which is `REL768A` for the long-term evolution experiment's clones and is the
 coordinate you typed for anything you submitted from an experiment like this one. An alias
 that is blank, or that is not a name MutInt can use, falls back to the accession itself (or,
@@ -86,36 +88,29 @@ them.
 A sample made from an accession records the run it came from, and the sample's page links it
 to the archive.
 
-## Three ways to name a sample
+## Two ways to name a sample
 
 The **Input type** menu at the top of the form decides how the samples in a drop are named,
 and shows only the boxes that way needs.
 
-### Single sample with metadata from a name
+### Single sample
 
-Type the name in **Full Name**. The three boxes below it show how it will be read — which
-population, which time point, which sample — and cannot be typed into; switch to the next
-input type to set them yourself.
-
-**The name is stored exactly as you type it.** It is also the name of the directory breseq
-writes into, so it may use letters, digits, spaces, dot, underscore, plus and hyphen, and must
-start with a letter or a digit.
-
-### Single sample with specified population, time point
-
-Fill in **Population**, **Time point** and **Sample**, and the name is built from them —
-joined with underscores, and shown in the Full Name box, which is read-only in this mode.
-Population and Time point offer the values this experiment already uses and take a new one
-just as readily.
+Fill in **Sample**, **Population** and **Time point**, and the name is built from them --
+joined with underscores, and shown beneath as **Name (as stored)**, which cannot be typed
+into: it is the sample's name in MutInt and the directory breseq writes into. Population and
+Time point offer the values this experiment already uses and take a new one just as readily.
 
 Leave Population and Time point empty and the sample is filed under **Unspecified** with no
 time point. A name carries a population and a time point together or neither: there is no way
 to write one without the other.
 
-### One or more samples with metadata from read names
+Everything you drop or type is this one sample's reads. If the accessions resolve to several
+SRA samples, the page asks before launching whether you mean them as one.
+
+### Multiple samples
 
 No name boxes at all: **each read file, or each pair of mates, is one sample**, named after the
-file. Drop twenty files and launch ten samples in one go — each becomes a run of its own, with
+file -- or named by a `metadata.csv` dropped with the reads, below. Drop twenty files and launch ten samples in one go — each becomes a run of its own, with
 its own entry on the Jobs page and its own Cancel.
 
 What is removed from a filename to leave the sample's name is the extension, the read number,
@@ -156,9 +151,22 @@ renaming the files is quicker than correcting the samples afterwards.
 **The Population sample checkbox applies to every sample in the drop.** Read names say nothing
 about clonality — a drop that mixes clones and populations is two launches.
 
+### Naming samples with metadata.csv
+
+Drop a `metadata.csv` among the read files under **Multiple samples** and it names and
+places the samples instead of their filenames. It is the same file the Import data page
+takes (see *Loading data* there for the columns and the blank and worked-example templates,
+which the form links to): one row per sample, with `sample`, `population`, `time_point`, and
+a `data` cell naming the read files -- exactly, or by a stem the files share, so `s1` covers
+`s1_R1.fastq.gz` and `s1_R2.fastq.gz`. A `sample_type` of `population` or `clone` sets that
+sample's **Population sample** option over the checkbox's. The preview under the drop zone shows what each row
+did before anything is uploaded. A file set no row names keeps its derived name; two rows
+naming one file is refused. Accessions are not renamed by the file. Under Single sample the
+file is listed and not used.
+
 ### What a name places, and what it does not
 
-Whichever input type you use, the same two shapes place a sample on its population and time
+Under Single sample and for a derived name alike, the same two shapes place a sample on its population and time
 point automatically:
 
 | name | population | time point | sample |
@@ -355,7 +363,7 @@ remove the data. Delete the sample itself from the mutation editor if that is wh
 
 ## What it does not do
 
-- **It does not name several samples for you by hand.** Two of the three input types are one
+- **It does not name several samples for you by hand.** Single sample is one
   sample per launch; the third takes as many as the drop holds, but only because the read
   names carry the names. There is no table of boxes to fill in.
 - **It does not choose the reference.** Every run uses the experiment's own, which is what

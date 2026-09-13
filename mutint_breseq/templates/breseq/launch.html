@@ -3,6 +3,8 @@
 {% load static %}
 
 {% block scripts_and_style %}
+    {# mutintConfirm calls swal(); base.html does not load sweetalert. #}
+    <script src="{% static "vendor/sweetalert-2.1.2/sweetalert.min.js" %}"></script>
     {% comment %} The browser's copy of `mutint_import/sample_names.py`, which splits the Full
        Name box into the three below it. Core's, not this plugin's: it mirrors a core rule and
        is guarded by a core test. {% endcomment %}
@@ -55,29 +57,26 @@
            {% endcomment %}
         <div class="form-group">
             <label for="breseq-input-mode">Input type</label>
+            {% comment %} Two modes. A third, a name typed whole and stored verbatim, went:
+               it was the composed name's preview made editable, and a mode that trusted a
+               string beside one that composed was two answers to one question. The values
+               stay `parts` and `read_names` -- they are what every stored preference holds
+               -- and only the labels say Single and Multiple. {% endcomment %}
             <select class="form-control" id="breseq-input-mode">
-                <option value="name">Single sample with metadata from a name</option>
-                <option value="parts">Single sample with specified population, time point</option>
-                <option value="read_names">One or more samples with metadata from read names</option>
+                <option value="parts">Single sample</option>
+                <option value="read_names">Multiple samples</option>
             </select>
         </div>
 
-        {% comment %} Full Name and the three parts, kept in step both ways: the name is split
-           into the parts as you type it, and composed back from them as you edit those. Which
-           side is editable is the mode's to say; the other is disabled and shows what the
-           first one means.
-
-           The split is `mutint_sample_names.js`, a copy of the rule the importer uses. It can
-           only mislead: the server parses or composes, and the importer parses, all in Python.
-           {% endcomment %}
-        <div class="form-group" data-mode-show="name parts">
-            <label for="breseq-sample-name">Full Name</label>
-            <input type="text" class="form-control" id="breseq-sample-name"
-                   placeholder="e.g. Ara-2_500gen_763A" autocomplete="off">
-            <small class="help-block" id="breseq-name-help"></small>
-        </div>
-
-        <div class="row" data-mode-show="name parts">
+        {% comment %} The three boxes compose the name shown beneath them; the name is
+           split back into them on blur, so an underscore typed into a box is caught by the
+           same rule the server composes with. {% endcomment %}
+        <div class="row" data-mode-show="parts">
+            <div class="col-sm-4 form-group">
+                <label for="breseq-sample">Sample</label>
+                <input type="text" class="form-control" id="breseq-sample" maxlength="100"
+                       autocomplete="off">
+            </div>
             <div class="col-sm-4 form-group">
                 {% comment %} Text with a list, not a select: a new sample is often the first
                    of its population, so an existing value has to be offered without being
@@ -97,14 +96,21 @@
                     {% for value in time_points %}<option value="{{ value }}"></option>{% endfor %}
                 </datalist>
             </div>
-            <div class="col-sm-4 form-group">
-                <label for="breseq-sample">Sample</label>
-                <input type="text" class="form-control" id="breseq-sample" maxlength="100"
-                       autocomplete="off">
-            </div>
         </div>
         <small class="help-block" id="breseq-identity-note" style="margin-top: -0.5em;"
-               data-mode-show="name parts"></small>
+               data-mode-show="parts"></small>
+
+        {% comment %} The composed name, read-only: the one place a person sees the string
+           that becomes the sample's name and the directory breseq writes into. Disabled
+           in the markup and never enabled -- it used to be typed into under the mode that
+           went. The split back into the boxes on blur is `mutint_sample_names.js`, a copy
+           of the importer's rule that decides nothing. {% endcomment %}
+        <div class="form-group" data-mode-show="parts">
+            <label for="breseq-sample-name">Name (as stored)</label>
+            <input type="text" class="form-control" id="breseq-sample-name"
+                   placeholder="e.g. Ara-2_500gen_763A" autocomplete="off" disabled>
+            <small class="help-block" id="breseq-name-help"></small>
+        </div>
 
         {% comment %} The third mode's own explanation. It has no boxes, so this is the whole
            of what it says before the drop; what the names will actually produce is the
@@ -113,7 +119,10 @@
              style="padding: 0.6em 1em;">
             Each read file &mdash; or each pair of mates &mdash; is one sample, named after the
             file with the read number, lane and extension removed. What each one will be called
-            is listed under the drop zone before anything is uploaded.
+            is listed under the drop zone before anything is uploaded. Drop a
+            <code>metadata.csv</code> with the reads to name and place the samples yourself:
+            <a href="{% static 'mutint_import/metadata-template.csv' %}" download>blank template</a>,
+            <a href="{% static 'mutint_import/metadata-example.csv' %}" download>worked example</a>.
         </div>
 
         {% comment %} Above the arguments box because it is the question people actually have
@@ -206,7 +215,7 @@
                 experiment (<code>SRX</code>) or a study (<code>SRP</code>,
                 <code>PRJNA</code>), separated by commas, spaces or new lines. Every run under
                 a sample or experiment is one sample's reads; a study is one sample per
-                BioSample in it. With <i>metadata from read names</i> chosen, each accession is
+                BioSample in it. Under <b>Multiple samples</b>, each accession is
                 a sample of its own, called what its submitter called it &mdash; or the
                 accession, when that is not a name MutInt can use. The reads are downloaded by
                 the worker, so the launch is quick and the download shows in the run's log.

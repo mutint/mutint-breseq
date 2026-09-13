@@ -112,6 +112,30 @@ class LaunchTestCase(TestCase):
                      "var uploading"):
             self.assertIn(name, source)
 
+    def test_the_menu_offers_two_input_types_and_the_dialog_can_be_drawn(self):
+        """Single and Multiple, the retired name mode gone -- and sweetalert loaded, because
+        the single-sample dialog calls swal() and base.html does not load it."""
+        from django.contrib.staticfiles import finders
+
+        response = self.client.get("/breseq/?experiment_id=%s" % self.experiment.id)
+        html = response.content.decode()
+        self.assertIn('value="parts">Single sample<', html)
+        self.assertIn('value="read_names">Multiple samples<', html)
+        self.assertNotIn('value="name"', html)
+        self.assertIn("sweetalert", html)
+        self.assertIn("Name (as stored)", html)
+        self.assertIn("mutint_import/metadata-template.csv", html)
+        # The boxes read Sample, Population, Time point.
+        self.assertLess(html.index('id="breseq-sample"'), html.index('id="breseq-population"'))
+        self.assertLess(html.index('id="breseq-population"'), html.index('id="breseq-time-point"'))
+
+        with open(finders.find("mutint_breseq/launch.js"), encoding="utf-8") as handle:
+            source = handle.read()
+        for name in ("function ensurePreview", "lastPreview", "mutintConfirm(",
+                     "metadataText", "Run as one sample"):
+            self.assertIn(name, source)
+        self.assertNotIn('"name", "parts"', source)
+
     def test_without_a_reference_the_form_is_replaced_by_a_banner(self):
         from mutint_experiment.views import _create_experiment
         bare = _create_experiment(self.project, "bare", self.owner)

@@ -111,42 +111,54 @@ and `reference.sequence_set_digest` of the two is equal — which is what stops
 `_establish_or_check_reference` rejecting every run as a reference mismatch. Verified before
 this was written.
 
-### The Input type menu, and the three contracts behind it
+### The Input type menu, and the two contracts behind it
 
-There were four boxes for one thing -- **Full Name** plus **Population**, **Time point** and
-**Sample**, kept in step both ways -- and that reads as two questions rather than one answered
-two ways. The menu says which half is being filled in, and the other half is **disabled**,
-showing what the first one means. The two-way sync is unchanged; what is new is that one side
-is always authoritative.
+The menu says how the samples in a drop are named, and the boxes each way needs are the only
+ones shown -- every element carrying `data-mode-show` lists its modes, so the markup says
+where it appears and `launch.js` holds no list.
 
-`disabled` rather than `readonly`: a disabled input posts nothing and cannot be focused, which
-is exactly "not editable unless you switch to that version of the form". `readonly` looks
-identical and still submits.
+| mode | label | posts | server |
+|---|---|---|---|
+| `parts` | Single sample | sample, population, time point | `compose_sample_name` -- one rule for how a coordinate becomes a string |
+| `read_names` | Multiple samples | nothing about names; `metadata` text if a CSV was dropped | `read_names.derive_samples` over the staged files, then `_apply_metadata` |
 
-**The three modes are three server contracts**, not one with optional fields:
+`parts` is the default, because it is the contract every existing caller posts. An unknown
+mode is a 400: guessing `parts` would launch one sample for a drop somebody meant as ten.
 
-| mode | posts | server |
-|---|---|---|
-| `parts` | population, time point, sample | `compose_sample_name` -- one rule for how a coordinate becomes a string |
-| `name` | the name | stored **verbatim** |
-| `read_names` | nothing about names | `read_names.derive_samples` over the staged files |
+**There was a third, and it went.** `name` posted the name typed whole and stored it
+verbatim, on the argument that composing is not a round trip (`3-30000-1-1` composes to
+`3_30000_1-1`). What it was in practice was the composed name's preview made editable, and
+a mode that trusted a string beside one that composed was two answers to one question. The
+composed name is still shown, as **Name (as stored)**, `disabled` in the markup and never
+enabled: it is the one place a person sees the string that becomes the directory, and the
+blur re-read through `mutint_sample_names.js` still splits it back into the boxes, which is
+what catches an underscore typed into Population. A stored `breseq.input_mode` of `name`
+is normalised to `parts` on init and written back; the server answers it with a 400 rather
+than guessing. The boxes read Sample, Population, Time point, which is the order a person
+thinks of them in.
 
-`parts` is the default, because it is the contract every existing caller posts and because a
-mode nobody named should be the one that composes rather than the one that trusts a string. An
-unknown mode is a 400: guessing `parts` would launch one sample for a drop somebody meant as
-ten.
+**Under Single sample, accessions resolving to several SRA samples are asked about.** Every
+read file, dropped or fetched, becomes one run and one sample there, which is almost never
+what somebody meant by typing a study accession. The submit handler asks `ensurePreview()`
+-- the last preview's samples when nothing changed since it was drawn (`previewKey` covers
+mode, paths, accessions, arguments and metadata text), else a fresh POST -- and counts
+distinct `biosample` values over the accession rows (`accession` when ENA gave none). Two or
+more raise `mutintConfirm`, a plain accept with "Run as one sample". A preview that cannot be
+fetched lets the launch proceed; the server refuses at launch whatever it would have. The
+page loads sweetalert itself, since `base.html` does not.
 
-**`name` stores the name verbatim, and that is a change.** Every mode used to post the three
-parts and the server recomposed -- which is not a round trip. `3-30000-1-1` parses to population
-3, time point 30000, label `1-1`, and composes back to `3_30000_1-1`, so somebody who typed a
-perfectly good A-F-I-R name got a different one. A mode called *metadata from a name* has to
-leave the name alone; the coordinate is still read out of it by the importer, exactly as it
-would be from a dropped folder of that name.
-
-**The split shown under the name is still `mutint_sample_names.js`**, core's transcription of
-`sample_names.py`, and it still decides nothing -- the server parses or composes and the
-importer parses, all in Python. That is the whole argument for having a second copy of that
-rule at all, and the JS header records the ways it is known to under-read.
+**A `metadata.csv` among the reads names the samples under Multiple samples.** It is core's
+file (`mutint_import.metadata`; the Import data page takes the same one), read by the page
+with `FileReader` and posted as text with the preview and the launch rather than uploaded
+with the reads -- it is about them, not one of them, and the server has no reason to store
+it; `_staged_files` skips one that reaches staging anyway. `_apply_metadata` runs the
+derivation first and then asks `Metadata.lookup_stem` over each derived sample's files, so a
+cell may be a stem the mates share; a hit composes the row's coordinate into the name, and
+the importer reads it back out exactly as from a dropped folder; a row's `sample_type` sets
+that run's `population_sample` over the form's checkbox, so one launch can mix clones and
+populations. Accession samples are not
+renamed. A row whose coordinate cannot be composed is a problem on that sample in the
+preview and a 400 at launch; two rows naming one file is a conflict from core's reader.
 
 **A blank Population and Time point is the unplaced case**, and the page says so: the sample
 lands on `Unspecified` with no time point rather than on a population called `1`.
@@ -465,7 +477,7 @@ nor accessions" is refused in one sentence.
 per BioSample in a study, and `sra.sample_name_for` names it by ENA's `sample_alias` --
 `REL768A` for the LTEE's clones -- falling back to the accession when the alias fails the
 `usable` test, which is `SAMPLE_NAME_RE` passed in from here: the name becomes a directory and
-a coordinate, exactly as a typed one does. In the two single-sample modes an accession's files
+a coordinate, exactly as a typed one does. Under Single sample an accession's files
 simply join the one sample; in `read_names` mode each accession is a row of its own beside the
 rows the dropped names derive. Two rows with one name -- an alias equal to a derived name, or
 two accessions sharing an alias -- are refused as a clash rather than launched to supersede
@@ -693,7 +705,7 @@ cd mutint && ./mutint test mutint_breseq
 
 There is no way to run them from mutint-core: the plugin is not installed there.
 
-**199 tests**, and the end-to-end ones are affordable because of two things. The test runner
+**208 tests**, and the end-to-end ones are affordable because of two things. The test runner
 forces `django.tasks` to its immediate backend, so `.enqueue()` runs inline and one POST
 exercises launch, the subprocess, the ingest and the cleanup. And `tests/fake_breseq.py` is a
 **real executable on disk** rather than a `subprocess.run` patch — the two things most likely

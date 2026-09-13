@@ -105,7 +105,7 @@ class RunTestCase(TestCase):
     def _launch(self, sample="s1", population="", time_point="", arguments="",
                 names=("s1_R1.fastq", "s1_R2.fastq"), trim_reads=None, content=None,
                 population_sample=None, coverage_limit=None, input_mode=None,
-                sample_name=None):
+                sample_name=None, metadata=None):
         """The endpoint takes the three parts of a coordinate, not a joined name: the server
         composes. `sample` alone is the unplaced case, which is what most of these want."""
         session = self._stage(names, content=content)
@@ -122,6 +122,8 @@ class RunTestCase(TestCase):
             body["input_mode"] = input_mode
         if sample_name is not None:
             body["sample_name"] = sample_name
+        if metadata is not None:
+            body["metadata"] = metadata
         return self.client.post(
             "/breseq/launch?experiment_id=%s" % self.experiment.id,
             data=json.dumps(body), content_type="application/json")
@@ -303,28 +305,18 @@ class RunTestCase(TestCase):
         self.assertEqual(run.sample.population.name, "Ara-2")
         self.assertEqual(run.sample.time_point, 500)
 
-    def test_a_name_posted_whole_is_kept_exactly_as_typed(self):
-        """The whole of what `input_mode="name"` buys.
-
-        Composing would rebuild the name from the coordinate read out of it, and that is not a
-        round trip: `3-30000-1-1` parses to population 3, time point 30000, label `1-1`, which
-        composes back to `3_30000_1-1`. A mode called *metadata from a name* has to leave the
-        name alone -- and the coordinate still lands, because the importer parses the name.
-        """
-        self._launch(input_mode="name", sample_name="3-30000-1-1")
-        run = BreseqRun.objects.get()
-
-        self.assertEqual(run.sample_name, "3-30000-1-1")
-        self.assertEqual(run.sample.source_name, "3-30000-1-1")
-        self.assertEqual(run.sample.population.name, "3")
-        self.assertEqual(run.sample.time_point, 30000)
-        self.assertEqual(run.sample.name, "1-1")
-
     def test_a_name_is_stripped_before_it_becomes_a_directory(self):
         # Surrounding whitespace is invisible in the box and some filesystems drop it, so the
-        # two would disagree about what the directory is called.
-        self._launch(input_mode="name", sample_name="  s1  ")
+        # two would disagree about what the directory is called. The composer strips.
+        self._launch(input_mode="parts", sample="  s1  ")
         self.assertEqual(BreseqRun.objects.get().sample_name, "s1")
+
+    def test_the_retired_name_mode_is_unknown_now(self):
+        """A stored preference or an old page may still post it; refused, not guessed."""
+        response = self._launch(input_mode="name", sample_name="typed")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["field"], "input_mode")
+        self.assertEqual(BreseqRun.objects.count(), 0)
 
     def test_the_parts_mode_still_composes(self):
         response = self._launch(input_mode="parts", population="Ara-2", time_point="500",
@@ -714,11 +706,86 @@ class RunTestCase(TestCase):
 
     # --- the preview ------------------------------------------------------------------------
 
-    def _preview(self, names, arguments=""):
+    def _preview(self, names, arguments="", metadata=None):
+        body = {"names": list(names), "arguments": arguments}
+        if metadata is not None:
+            body["metadata"] = metadata
         return self.client.post(
             "/breseq/preview?experiment_id=%s" % self.experiment.id,
-            data=json.dumps({"names": list(names), "arguments": arguments}),
-            content_type="application/json").json()
+            data=json.dumps(body), content_type="application/json").json()
+
+    # --- metadata.csv under Multiple samples --------------------------------------------
+
+    METADATA = ("sample,population,time_point,data\n"
+                "763A,Ara-2,500,s1\n"
+                "clone7,,,other\n")
+
+    def test_a_metadata_csv_names_the_samples_in_multiple_samples_mode(self):
+        response = self._launch(input_mode="read_names",
+                                names=("s1_R1.fastq", "s1_R2.fastq", "other_R1.fastq",
+                                       "other_R2.fastq"),
+                                metadata=self.METADATA)
+        self.assertEqual(response.status_code, 200, response.content)
+        names = sorted(BreseqRun.objects.values_list("sample_name", flat=True))
+        self.assertEqual(["Ara-2_500_763A", "clone7"], names)
+        placed = Sample.objects.get(source_name="Ara-2_500_763A")
+        self.assertEqual(("Ara-2", 500, "763A"),
+                         (placed.population.name, placed.time_point, placed.name))
+        unplaced = Sample.objects.get(source_name="clone7")
+        self.assertIsNone(unplaced.time_point)
+
+    def test_a_sample_type_in_the_csv_sets_that_run_s_population_flag(self):
+        typed = ("sample,population,time_point,sample_type,data\n"
+                 "763A,Ara-2,500,population,s1\n"
+                 "clone7,,,clone,other\n")
+        response = self._launch(input_mode="read_names",
+                                names=("s1_R1.fastq", "s1_R2.fastq", "other_R1.fastq",
+                                       "other_R2.fastq"),
+                                metadata=typed, population_sample=False)
+        self.assertEqual(response.status_code, 200, response.content)
+        flags = dict(BreseqRun.objects.values_list("sample_name", "population_sample"))
+        self.assertEqual({"Ara-2_500_763A": True, "clone7": False}, flags)
+        body = self._preview(["s1_R1.fastq", "s1_R2.fastq"], metadata=typed)
+        self.assertTrue(body["samples"][0]["population_sample"])
+
+    def test_the_preview_honours_the_metadata_and_says_so(self):
+        body = self._preview(["s1_R1.fastq", "s1_R2.fastq", "lonely_R1.fastq"],
+                             metadata=self.METADATA)
+        by_files = {tuple(row["files"]): row for row in body["samples"]}
+        named = by_files[("s1_R1.fastq", "s1_R2.fastq")]
+        self.assertEqual("Ara-2_500_763A", named["name"])
+        self.assertEqual("metadata", named["named_by"])
+        self.assertEqual("Ara-2", named["population"])
+        # A file set no row names keeps its derived name and carries no `named_by`.
+        self.assertEqual("lonely", by_files[("lonely_R1.fastq",)]["name"])
+        self.assertNotIn("named_by", by_files[("lonely_R1.fastq",)])
+
+    def test_two_rows_naming_one_file_are_refused(self):
+        # The same stem on two rows with different coordinates. (`s1` beside `s1_R` is not a
+        # clash: the longer token wins, which is the rule that lets `S12` beat `S1`.)
+        clashing = ("sample,population,time_point,data\n"
+                    "a,p,1,s1\n"
+                    "b,p,2,s1\n")
+        body = self.client.post(
+            "/breseq/preview?experiment_id=%s" % self.experiment.id,
+            data=json.dumps({"names": ["s1_R1.fastq", "s1_R2.fastq"], "metadata": clashing}),
+            content_type="application/json")
+        self.assertEqual(400, body.status_code)
+        self.assertEqual("metadata", body.json()["field"])
+        response = self._launch(input_mode="read_names", metadata=clashing)
+        self.assertEqual(400, response.status_code)
+        self.assertEqual(0, BreseqRun.objects.count())
+
+    def test_a_broken_metadata_csv_is_refused_at_launch(self):
+        response = self._launch(input_mode="read_names", metadata="sample,data\nx,s1\n")
+        self.assertEqual(400, response.status_code)
+        self.assertEqual("metadata", response.json()["field"])
+        self.assertIn("time_point", response.json()["error"])
+
+    def test_metadata_is_ignored_under_single_sample(self):
+        response = self._launch(input_mode="parts", sample="typed", metadata=self.METADATA)
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual("typed", BreseqRun.objects.get().sample_name)
 
     def test_the_preview_names_the_samples_a_drop_would_make(self):
         body = self._preview(["Ara-2_500gen_763A_R1.fastq.gz",
