@@ -15,27 +15,46 @@
 #
 # Prerelease rather than the stable bioconda `breseq`, because this tracks breseq's master.
 #
-# **Pinned by build string, which is the git hash.** Every build reports a version derived
-# from git -- `0.40.1.dev422+g23736ada` -- and publishes it with the short hash as its *build*
-# (`g23736ada`), so `=*=<hash>` names exactly one artifact and the hash is the only thing that
-# moves.
+# **Pinned by build string, and copy it exactly as the channel publishes it.** Every build
+# reports a version derived from git -- `0.40.1.dev425+g9aab25c1` -- and publishes it with the
+# short hash as its *build*, so `=*=<build>` names exactly one artifact.
 #
-# **This build is a requirement rather than a preference**: it is the first with `--dry-run`,
-# which `views.launch` and `tasks.run_breseq` both gate a run on. An older breseq rejects that
+# **The build is not always just the hash**: a rebuild of the same commit gets a `_N` suffix,
+# and the current one is `g9aab25c1_1`. `dev424` is published twice, as `gab1f4511` and
+# `gab1f4511_1`, which is what makes this worth stating -- the hash alone is not a spec. A
+# build string that matches nothing does not degrade to something older, it fails the *whole*
+# tools solve, and with it `./mutint start`: measured, `=*=g9aab25c1` (no suffix) stops with
+# `does not exist (perhaps a typo or a missing channel)`. Read the build off the channel's
+# repodata rather than off the version string:
+#
+#     curl -s https://barricklab.github.io/conda/osx-arm64/repodata.json
+#
+# and check the platform you are *not* on as well -- one solve covers every component, and CI
+# runs on linux-64.
+#
+# `=<version>=<build>` would pin the same artifact and is deliberately not used: it is two
+# coupled tokens that must be edited together and mean nothing if they disagree.
+#
+# **A floor, not a preference: g23736ada.** That is the build `--dry-run` arrived in, and
+# `views.launch` and `tasks.run_breseq` both gate a run on it. An older breseq rejects the
 # flag, so every run would fail at the preflight -- which is the loud failure to want, but it
 # means moving the pin backwards past g23736ada is not a thing that works.
 #
-# It also predicts CN, DP, MP and PD evidence by default, where those were opt-in. The old
-# `--predict-*` flags are still accepted and now do nothing, and the old `--skip-*-prediction`
-# spellings still work, so arguments saved on existing runs keep working. CN wants `CNery` on
-# PATH and is skipped with a warning without it, which is why nothing is added below. `=0.40.1.dev417+g1a30aed3` pins the same artifact and is not used, because it is two
-# coupled tokens that must be edited together and mean nothing if they disagree.
+# That build also predicts CN, DP, MP and PD evidence by default, where those were opt-in.
+# The old `--predict-*` flags are still accepted and now do nothing, and the old
+# `--skip-*-prediction` spellings still work, so arguments saved on existing runs keep
+# working. CN wants `CNery` on PATH and is skipped with a warning without it, which is why
+# nothing is added below.
+#
+# g9aab25c1, the build pinned below, calls copy number on a continuous grid in polymorphism
+# mode. It changes what CN evidence a polymorphic run reports; it changes no flag, so nothing
+# in this plugin had to move with it.
 #
 # It was unpinned, on the reasoning that a version cannot distinguish these builds. That is
 # true of the version and not of the build, and unpinned meant a checkout tracked master on a
 # fresh `env/tools` and then never moved again: the spec was already satisfied, so micromamba
 # was never asked. The entry script fingerprints the *spec list* (`env/tools/.installed`), so
-# editing the hash below is what makes the next `./mutint start` install the new breseq --
+# editing the build below is what makes the next `./mutint start` install the new breseq --
 # here, and on an installation, through `/update/`, which is applied before that fingerprint
 # is read.
 #
@@ -49,7 +68,7 @@
 # so `tool_path("breseq")` is not sufficient on its own: the subprocess needs env/tools/bin
 # on PATH or breseq stops with `Required executable "bowtie2" not found`, having exited 0.
 # mutint_breseq/runner.py `tool_environment()` is what builds that PATH.
-https://barricklab.github.io/conda/::breseq-prerelease=*=gab1f4511
+https://barricklab.github.io/conda/::breseq-prerelease=*=g9aab25c1_1
 
 # fastp trims adapters off the reads before breseq sees them, when a run asks for it -- which
 # is the default. bioconda has it, so no channel prefix; `--detect_adapter_for_pe` has been in

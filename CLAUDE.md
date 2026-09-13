@@ -81,8 +81,14 @@ Verified against the real channel: it resolves, and its dependencies come from b
 is already on the list. **Do not "tidy" this into a bare package name and a channel flag** —
 that is an edit to three entry scripts for one component's dependency.
 
-The spec is unpinned because every prerelease build reports a git-derived version
-(`0.40.1.dev417+g1a30aed3`); `rm -rf env/tools` is how you move it.
+**The spec is pinned by build string**, currently `=*=g9aab25c1_1`. Every prerelease build
+reports a git-derived version (`0.40.1.dev425+g9aab25c1`), so the version cannot tell two of
+them apart and the *build* is what names one artifact. Two things about moving it are worth
+knowing before you do: the build is not always just the hash -- a rebuild of the same commit
+gets a `_N` suffix -- and a build string matching nothing fails the **whole** tools solve
+rather than falling back, taking `./mutint start` with it. `tools.txt` carries the rest,
+including the floor below which `--dry-run` does not exist and why moving backwards can refuse
+to solve at all.
 
 ### The output directory is named for the sample, and that is what does the naming
 
@@ -705,7 +711,7 @@ cd mutint && ./mutint test mutint_breseq
 
 There is no way to run them from mutint-core: the plugin is not installed there.
 
-**208 tests**, and the end-to-end ones are affordable because of two things. The test runner
+**211 tests**, and the end-to-end ones are affordable because of two things. The test runner
 forces `django.tasks` to its immediate backend, so `.enqueue()` runs inline and one POST
 exercises launch, the subprocess, the ingest and the cleanup. And `tests/fake_breseq.py` is a
 **real executable on disk** rather than a `subprocess.run` patch — the two things most likely
