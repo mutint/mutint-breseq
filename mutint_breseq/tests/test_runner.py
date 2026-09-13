@@ -196,6 +196,23 @@ class FastpArgvTestCase(SimpleTestCase):
                      "--dedup", "-q", "-u", "-n"):
             self.assertNotIn(flag, argv)
 
+    def test_default_processors_leaves_two_cores(self):
+        """`./mutint start` runs a pool of workers, so this is no longer the only thing on the
+        machine: the web server, the cluster and another run may all be competing with it."""
+        with mock.patch.object(runner.os, "cpu_count", return_value=8):
+            self.assertEqual(6, runner.default_processors())
+
+    def test_a_small_machine_still_gets_one(self):
+        for cpus in (1, 2, 3):
+            with mock.patch.object(runner.os, "cpu_count", return_value=cpus):
+                self.assertEqual(1, runner.default_processors())
+
+    def test_an_unknown_core_count_still_says_nothing(self):
+        """None means "do not pass -j at all". Answering 1 would put breseq's own default on the
+        command line as though the page had chosen it."""
+        with mock.patch.object(runner.os, "cpu_count", return_value=None):
+            self.assertIsNone(runner.default_processors())
+
     def test_threads_are_capped_where_fastp_caps_them(self):
         with mock.patch.object(runner, "default_processors", return_value=64):
             self.assertEqual(16, runner.fastp_threads())

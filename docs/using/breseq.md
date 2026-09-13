@@ -234,12 +234,15 @@ wins over the box.
 ### The arguments box
 
 Passed to breseq as you type it. `-o` and `-r` are supplied for you — the output directory and
-the experiment's reference — and `-j` defaults to every processor on the machine unless you
-name one yourself.
+the experiment's reference — and `-j` defaults to every processor on the machine *but two*,
+unless you name one yourself. The two are left for the web server, the database and whatever
+else the background workers are running at the same time — `./mutint start` runs several of
+them, so a second breseq run beside this one is an ordinary state rather than a surprising
+one.
 
 Common ones:
 
-- `-j 4` — use four processors rather than all of them, to leave the machine usable.
+- `-j 4` — a fixed number rather than the default, when several runs will overlap.
 
 breseq's own documentation lists the rest. Nothing is passed through a shell, so quoting works
 the way it does in a terminal and nothing else in the box can have any other effect.

@@ -170,8 +170,19 @@ def refusal_from(output):
 
 
 def default_processors():
-    """All of them. `os.cpu_count()` can answer None, in which case say nothing."""
-    return os.cpu_count() or None
+    """All but two of them. `os.cpu_count()` can answer None, in which case say nothing.
+
+    Two are left because this is no longer the only thing running: `./mutint start` runs a pool
+    of background workers, so a second breseq run, the web server and the cluster are all
+    competing with this one. It was every core, which was defensible when only one task could
+    ever be in flight.
+
+    **None still means "say nothing"** rather than 1, because the caller reads it that way --
+    injecting `-j 1` would put breseq's own default on the command line as though the page had
+    chosen it.
+    """
+    count = os.cpu_count()
+    return max(1, count - 2) if count else None
 
 
 def tool_environment(env=None):
