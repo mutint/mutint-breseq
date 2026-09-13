@@ -125,6 +125,7 @@ class LaunchTestCase(TestCase):
         self.assertIn("sweetalert", html)
         self.assertIn("Name (as stored)", html)
         self.assertIn("mutint_import/metadata-template.csv", html)
+        self.assertIn("mutint_import/metadata-example-reads.csv", html)
         # The boxes read Sample, Population, Time point.
         self.assertLess(html.index('id="breseq-sample"'), html.index('id="breseq-population"'))
         self.assertLess(html.index('id="breseq-population"'), html.index('id="breseq-time-point"'))
