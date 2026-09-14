@@ -178,7 +178,11 @@
                 Passed to breseq as typed. <code>-o</code> and <code>-r</code> are supplied
                 for you, and <code>-j</code> defaults to every processor on this machine
                 but two, unless you name one here. The two are left for the web server, the
-                database and any other run going at the same time.
+                database and any other run going at the same time. Every run also gets
+                <code>--max-evidence-items 5000 --max-percent-divergence 1.0</code>, so reads
+                analyzed against the wrong reference stop with an error instead of predicting
+                hundreds of thousands of mutations; name either option here to change or
+                disable it (<code>0</code> is off).
             </small>
         </div>
 

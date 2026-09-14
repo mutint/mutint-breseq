@@ -116,6 +116,21 @@ class ArgvTestCase(SimpleTestCase):
     def test_nothing_is_injected_without_a_count(self):
         self.assertNotIn("-j", self.build(processors=None))
 
+    def test_divergence_limits_are_on_every_command_line(self):
+        # The wrong reference would otherwise cost hours and import a million spurious rows.
+        argv = self.build()
+        self.assertEqual(argv[argv.index("--max-evidence-items") + 1], "5000")
+        self.assertEqual(argv[argv.index("--max-percent-divergence") + 1], "1.0")
+        # Ahead of the read files, which are positional.
+        self.assertLess(argv.index("--max-percent-divergence"), argv.index("r1.fastq"))
+
+    def test_a_typed_divergence_limit_wins_and_the_other_stays(self):
+        # `0` is how breseq spells "off", and each flag is suppressed on its own.
+        argv = self.build(arguments="--max-evidence-items 0")
+        self.assertEqual(argv.count("--max-evidence-items"), 1)
+        self.assertEqual(argv[argv.index("--max-evidence-items") + 1], "0")
+        self.assertEqual(argv[argv.index("--max-percent-divergence") + 1], "1.0")
+
 
 class DryRunArgvTestCase(TestCase):
     """The preflight has to be the real command line plus one flag, or it checks the wrong

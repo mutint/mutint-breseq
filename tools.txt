@@ -35,20 +35,29 @@
 # `=<version>=<build>` would pin the same artifact and is deliberately not used: it is two
 # coupled tokens that must be edited together and mean nothing if they disagree.
 #
-# **A floor, not a preference: g23736ada.** That is the build `--dry-run` arrived in, and
-# `views.launch` and `tasks.run_breseq` both gate a run on it. An older breseq rejects the
-# flag, so every run would fail at the preflight -- which is the loud failure to want, but it
-# means moving the pin backwards past g23736ada is not a thing that works.
+# **A floor, not a preference: gf7100f9a.** That is the build `--max-evidence-items` and
+# `--max-percent-divergence` arrived in, and `runner.build_argv` puts both on every command
+# line by default (see `DIVERGENCE_DEFAULTS` there). An older breseq rejects the flags, so
+# every run would fail at the preflight -- which is the loud failure to want, but it means
+# moving the pin backwards past gf7100f9a is not a thing that works. Before that the floor
+# was g23736ada, where `--dry-run` arrived; `views.launch` and `tasks.run_breseq` both still
+# gate a run on it.
 #
-# That build also predicts CN, DP, MP and PD evidence by default, where those were opt-in.
+# g23736ada also predicts CN, DP, MP and PD evidence by default, where those were opt-in.
 # The old `--predict-*` flags are still accepted and now do nothing, and the old
 # `--skip-*-prediction` spellings still work, so arguments saved on existing runs keep
 # working. CN wants `CNery` on PATH and is skipped with a warning without it, which is why
 # nothing is added below.
 #
-# g9aab25c1, the build pinned below, calls copy number on a continuous grid in polymorphism
-# mode. It changes what CN evidence a polymorphic run reports; it changes no flag, so nothing
-# in this plugin had to move with it.
+# g9aab25c1 calls copy number on a continuous grid in polymorphism mode. It changes what CN
+# evidence a polymorphic run reports; it changes no flag, so nothing in this plugin had to
+# move with it.
+#
+# gf7100f9a, the build pinned below, turns breseq's long-standing divergence *warning* into
+# an optional hard stop: `--max-evidence-items` and `--max-percent-divergence`, both off in
+# breseq itself. This plugin turns them on (5000 items, 1.0%), because a person who drops
+# reads against the wrong reference would otherwise get a run that spends hours annotating
+# hundreds of thousands of spurious mutations and then imports every one of them.
 #
 # It was unpinned, on the reasoning that a version cannot distinguish these builds. That is
 # true of the version and not of the build, and unpinned meant a checkout tracked master on a
@@ -68,7 +77,7 @@
 # so `tool_path("breseq")` is not sufficient on its own: the subprocess needs env/tools/bin
 # on PATH or breseq stops with `Required executable "bowtie2" not found`, having exited 0.
 # mutint_breseq/runner.py `tool_environment()` is what builds that PATH.
-https://barricklab.github.io/conda/::breseq-prerelease=*=g9aab25c1_1
+https://barricklab.github.io/conda/::breseq-prerelease=*=gf7100f9a_1
 
 # fastp trims adapters off the reads before breseq sees them, when a run asks for it -- which
 # is the default. bioconda has it, so no channel prefix; `--detect_adapter_for_pe` has been in

@@ -50,6 +50,16 @@ POLYMORPHISM_FLAGS = ("-p", "--polymorphism-prediction")
 # genuine ambiguity rather than merely untidy.
 COVERAGE_FLAGS = ("-l", "--limit-fold-coverage")
 
+# Hard limits on how far the sample may diverge from the reference, on every run unless the
+# arguments box names one. breseq ships both **off**, as a warning; here they are a fatal
+# error, because the case they catch is a person dropping reads against the wrong reference
+# -- which otherwise predicts hundreds of thousands of spurious mutations, spends hours
+# annotating them, and then hands this plugin a sample of a million rows to import. Long
+# spellings only, since breseq has no short ones. Typed `--max-evidence-items 0` is how a
+# genuinely divergent sample turns a cap off. Arrived in breseq-prerelease gf7100f9a, which is
+# the floor `tools.txt` pins for.
+DIVERGENCE_DEFAULTS = (("--max-evidence-items", "5000"), ("--max-percent-divergence", "1.0"))
+
 # breseq validates the options and every path, then exits without running and without creating
 # anything -- 0 if it is happy, nonzero if not. Added in breseq-prerelease g23736ada, which
 # `tools.txt` pins for this reason.
@@ -116,7 +126,8 @@ def build_argv(breseq, output_dir, reference, arguments, reads, processors=None,
 
     Both follow `processors`: injected only where the arguments box does not already say, and
     placed with the other injected defaults rather than after the typed arguments, so the box
-    remains the last word on everything.
+    remains the last word on everything. `DIVERGENCE_DEFAULTS` are the same rule with no box
+    behind them: on every command line, each one suppressed by that flag being typed.
 
     `dry_run` adds `--dry-run`, and **the preflight is otherwise this same command line** --
     one builder, deliberately, because a preflight assembled separately would validate
@@ -139,6 +150,9 @@ def build_argv(breseq, output_dir, reference, arguments, reads, processors=None,
         argv.append("-p")
     if coverage_limit is not None and not any(flag in typed for flag in COVERAGE_FLAGS):
         argv += ["-l", format_coverage_limit(coverage_limit)]
+    for flag, value in DIVERGENCE_DEFAULTS:
+        if flag not in typed:
+            argv += [flag, value]
     argv += ["-o", output_dir, "-r", reference]
     argv += typed
     argv += list(reads)

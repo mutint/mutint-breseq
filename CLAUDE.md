@@ -81,14 +81,14 @@ Verified against the real channel: it resolves, and its dependencies come from b
 is already on the list. **Do not "tidy" this into a bare package name and a channel flag** —
 that is an edit to three entry scripts for one component's dependency.
 
-**The spec is pinned by build string**, currently `=*=g9aab25c1_1`. Every prerelease build
-reports a git-derived version (`0.40.1.dev425+g9aab25c1`), so the version cannot tell two of
+**The spec is pinned by build string**, currently `=*=gf7100f9a_1`. Every prerelease build
+reports a git-derived version (`0.40.1.dev426+gf7100f9a`), so the version cannot tell two of
 them apart and the *build* is what names one artifact. Two things about moving it are worth
 knowing before you do: the build is not always just the hash -- a rebuild of the same commit
 gets a `_N` suffix -- and a build string matching nothing fails the **whole** tools solve
 rather than falling back, taking `./mutint start` with it. `tools.txt` carries the rest,
-including the floor below which `--dry-run` does not exist and why moving backwards can refuse
-to solve at all.
+including the floor below which `--max-evidence-items` does not exist and why moving
+backwards can refuse to solve at all.
 
 ### The output directory is named for the sample, and that is what does the naming
 
@@ -348,6 +348,25 @@ from it. **Nothing posts the checkbox**: unticked simply sends blank, which is a
 server spells "every read", so the two cannot arrive disagreeing and no boolean joins
 `coverage_limit` on the model. Same rule as `locked_at` in core -- the value is the flag, with
 nothing beside it to hold a second opinion.
+
+### Every run is capped on divergence from the reference, so the wrong reference fails fast
+
+`--max-evidence-items 5000 --max-percent-divergence 1.0` go on every command line, the fourth
+injection rule in `build_argv` and the first that is a **default rather than a box**: there is
+nothing on the page for it, and `DIVERGENCE_DEFAULTS` in `runner.py` is the whole of the
+setting. breseq itself ships both off. They turn the divergence warning it has always printed
+-- accepted evidence items against reference length, checked before any mutation is predicted
+-- into a fatal error with exit status 1, and the reason for wanting that here is what a wrong
+reference costs: a sample run against the wrong genome otherwise predicts hundreds of
+thousands of spurious mutations, spends hours annotating them, and then this plugin imports
+every one into the experiment. Failing at that check instead costs minutes and leaves nothing
+to clean up.
+
+**The box still wins.** Either flag typed into the arguments box, at any value, suppresses the
+injected one -- so `--max-evidence-items 0` is how a person who really is analysing a
+divergent sample turns the cap off. Long spellings only, because breseq has no short ones.
+Both arrived in prerelease `gf7100f9a`, which is the pin's floor now: an older breseq rejects
+them at the preflight.
 
 Two things fall out of the checkbox and both are in the page. Ticking fills in `80` rather
 than enabling an empty box, because enabled-and-empty would be a third state saying nothing;
