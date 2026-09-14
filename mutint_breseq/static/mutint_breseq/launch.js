@@ -246,6 +246,17 @@
     var fileInput = document.getElementById("breseq-file-input");
     var fileListEl = document.getElementById("breseq-file-list");
     var submitBtn = document.getElementById("breseq-submit");
+    var annotationHold = document.getElementById("breseq-annotation-hold");
+    // Whether a reference annotator is still rewriting this experiment's annotation. The
+    // panel under the tab strip -- core's, drawn by `{% import_tabs %}` on every import tab
+    // page including this one -- owns the answer and announces it; this page only listens.
+    //
+    // **This is the most expensive thing that panel prevents.** A breseq run is hours, and one
+    // launched against the reference as it stands right now will call each IS insertion as two
+    // junctions -- which is exactly what running ISEScan first is for, and which re-annotating
+    // the genome afterwards cannot turn back into a MOB. The run is not wrong so much as
+    // wasted.
+    var annotationBusy = false;
     var resetBtn = document.getElementById("breseq-reset");
     var nameInput = document.getElementById("breseq-sample-name");
     var populationInput = document.getElementById("breseq-population");
@@ -662,7 +673,10 @@
 
     function renderList() {
         var typed = accessionsText();
-        submitBtn.disabled = !selected.length && !typed;
+        submitBtn.disabled = annotationBusy || (!selected.length && !typed);
+        if (annotationHold) {
+            annotationHold.style.display = annotationBusy ? "" : "none";
+        }
         if (resetBtn) {
             resetBtn.disabled = uploading || (!selected.length && !typed && !metadataText);
         }
@@ -748,14 +762,20 @@
         // box -- because each preview is a round trip to ENA per accession, and a table that
         // redrew on every keystroke would ask about `S`, `SR`, `SRR`...
         accessionsEl.addEventListener("input", function () {
-            submitBtn.disabled = !selected.length && !accessionsText();
+            submitBtn.disabled = annotationBusy || (!selected.length && !accessionsText());
             if (resetBtn) { resetBtn.disabled = uploading || submitBtn.disabled; }
         });
         accessionsEl.addEventListener("change", renderList);
     }
 
+    document.addEventListener("mutint:annotation-status", function (event) {
+        annotationBusy = !!(event.detail && event.detail.busy);
+        renderList();
+    });
+
     form.addEventListener("submit", function (e) {
         e.preventDefault();
+        if (annotationBusy) { return; }
         if (!selected.length && !accessionsText()) { return; }
         errorEl.innerHTML = "";
         // Only when a limit was asked for -- a disabled input is barred from constraint

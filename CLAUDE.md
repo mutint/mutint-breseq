@@ -634,6 +634,24 @@ pair is never half trimmed; so is anything not FASTQ by name. fastp failing fail
 directory, so deleting a running one pulls the reads out from under the live subprocess and
 breseq then fails minutes later naming neither cause nor culprit. Cancel, then delete.
 
+### The launcher is held while a reference annotator is running
+
+The notice above the tab strip is core's, drawn by `{% import_tabs %}`, which this page
+already renders -- so it arrives here whether or not this plugin asks. What this plugin adds
+is four lines: `launch.js` listens for `mutint:annotation-status`, sets `annotationBusy`, and
+lets `renderList` (which already owns `submitBtn.disabled`) hold the button; the submit
+handler refuses as well, since a stale page could still post.
+
+**This is the most expensive mistake that notice prevents anywhere in the suite.** A breseq
+run is hours, and one launched against the reference *as it stands* calls every IS insertion
+as two junctions -- which is exactly what running ISEScan on the reference first is for, and
+which re-annotating the genome afterwards cannot turn back into a MOB. Nothing is corrupted;
+the run is simply wasted, and nothing would have said so.
+
+Core's script deliberately touches no button itself -- it loads on pages core does not own,
+and reaching for an id it did not choose is the coupling that breaks quietly. So the shared
+half announces and this half decides, which is why the listener lives here.
+
 ### The import lock is waited on, not raced
 
 `import_lock.acquire()` refuses immediately, because the web path would rather answer 409 than
@@ -730,7 +748,7 @@ cd mutint && ./mutint test mutint_breseq
 
 There is no way to run them from mutint-core: the plugin is not installed there.
 
-**211 tests**, and the end-to-end ones are affordable because of two things. The test runner
+**218 tests**, and the end-to-end ones are affordable because of two things. The test runner
 forces `django.tasks` to its immediate backend, so `.enqueue()` runs inline and one POST
 exercises launch, the subprocess, the ingest and the cleanup. And `tests/fake_breseq.py` is a
 **real executable on disk** rather than a `subprocess.run` patch — the two things most likely

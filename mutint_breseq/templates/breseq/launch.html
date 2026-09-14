@@ -242,6 +242,14 @@
 
         <div id="breseq-error"></div>
 
+        {% comment %} Beside the button rather than only in the notice above the tab strip: a
+           disabled control whose explanation is several screens up is a dead end. See
+           `launch.js`'s `mutint:annotation-status` listener. {% endcomment %}
+        <div id="breseq-annotation-hold" class="help-block"
+             style="display: none; color: #8a6d3b;">
+            Held while a reference annotator is running &mdash; a run started now would call
+            this genome as it is, and re-annotating afterwards cannot undo that. The notice
+            above offers its log and a way to stop it.</div>
         <button type="submit" class="btn btn-primary" id="breseq-submit" disabled>
             Run breseq</button>
         {% comment %} Clears the staged files and the accessions together, as a successful

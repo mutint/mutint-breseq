@@ -456,3 +456,62 @@ class RunListTestCase(TestCase):
         self.assertEqual(
             self.client.post("/breseq/run/%d/delete" % run.pk).status_code, 403)
         self.assertTrue(BreseqRun.objects.filter(pk=run.pk).exists())
+
+
+class AnnotationHoldTestCase(TestCase):
+    """A run is not launched while a reference annotator is still rewriting the annotation.
+
+    **This is the most expensive thing that hold prevents.** A breseq run is hours, and one
+    started against the reference as it stands right now calls every IS insertion as two
+    junctions -- which is exactly what running ISEScan first is for, and which re-annotating
+    the genome afterwards cannot turn back into a MOB. The run is not wrong so much as wasted.
+
+    The notice itself is core's, drawn under the tab strip by `{% import_tabs %}`, which this
+    page already renders. All this plugin does is listen: core's script deliberately touches
+    no button on any page, since it loads on pages core does not own.
+    """
+
+    def setUp(self):
+        # Its own minimal fixture rather than inheriting `LaunchTestCase`'s: a subclass would
+        # rerun every one of that class's tests as well.
+        self.owner = User.objects.create(username="holder", email="h@e.com", is_active=True)
+        self.client.force_login(self.owner)
+        self.store = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.store, True)
+        patcher = override_settings(MUTINT_STORE_DIR=self.store)
+        patcher.enable()
+        self.addCleanup(patcher.disable)
+        self.project = Project.objects.create(name="p", user=self.owner)
+        from mutint_experiment.views import _create_experiment
+        self.experiment = _create_experiment(self.project, "e", self.owner)
+        establish_reference(self.experiment)
+
+    def _source(self):
+        from django.contrib.staticfiles import finders
+
+        with open(finders.find("mutint_breseq/launch.js"), encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_the_page_wears_cores_annotation_notice(self):
+        response = self.client.get("/breseq/?experiment_id=%s" % self.experiment.id)
+        self.assertContains(response, 'id="mutint-annotation-panel"')
+        self.assertContains(response, "mutint_annotation_status.js")
+
+    def test_the_script_listens_rather_than_polling_for_itself(self):
+        source = self._source()
+        self.assertIn('document.addEventListener("mutint:annotation-status"', source)
+        # No second poller and no second endpoint: one surface owns the question.
+        self.assertNotIn("/import/annotators/status", source)
+
+    def test_renderlist_is_what_holds_the_button(self):
+        """One owner per flag: the listener sets `annotationBusy` and calls back into
+        `renderList`, which is where `submitBtn.disabled` is computed."""
+        self.assertIn("submitBtn.disabled = annotationBusy ||", self._source())
+
+    def test_the_submit_handler_refuses_too(self):
+        """A disabled button is not the guard -- a stale page could still submit."""
+        self.assertIn("if (annotationBusy) { return; }", self._source())
+
+    def test_the_reason_sits_beside_the_button(self):
+        response = self.client.get("/breseq/?experiment_id=%s" % self.experiment.id)
+        self.assertContains(response, 'id="breseq-annotation-hold"')
