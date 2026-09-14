@@ -314,6 +314,13 @@ def run_breseq(context, run_id):
         _fail(run, message)
         raise RuntimeError(message)
 
+    # Which breseq reference option each contig is passed under. Resolved once, here, so the
+    # dry run below validates the same command line the real run uses -- the reason there is
+    # one argv builder at all. Files, where any are needed, go inside the run directory, which
+    # `_discard_files` and the model's `post_delete` receiver already remove.
+    references = runner.reference_arguments(
+        experiment, os.path.join(run.directory(), "reference"), reference)
+
     try:
         breseq = runner.breseq_path()
     except ToolMissing as missing:
@@ -373,7 +380,7 @@ def run_breseq(context, run_id):
         #
         # `reads` is still the untrimmed list here, which is what the dry run wants: the
         # trimmed copies do not exist yet, and breseq checks that its inputs do.
-        argv = runner.build_argv(breseq, run.output_dir(), reference, run.arguments, reads,
+        argv = runner.build_argv(breseq, run.output_dir(), references, run.arguments, reads,
                                  processors=runner.default_processors(), dry_run=True,
                                  polymorphism=run.population_sample,
                                  coverage_limit=run.coverage_limit)
@@ -442,7 +449,7 @@ def run_breseq(context, run_id):
                 _cancelled(run, log=_tail(queue_id, run))
                 return None
 
-        argv = runner.build_argv(breseq, run.output_dir(), reference, run.arguments, reads,
+        argv = runner.build_argv(breseq, run.output_dir(), references, run.arguments, reads,
                                  processors=runner.default_processors(),
                                  polymorphism=run.population_sample,
                                  coverage_limit=run.coverage_limit)

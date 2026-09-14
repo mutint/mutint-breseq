@@ -32,7 +32,8 @@ from mutint_experiment.permissions import (
 )
 from mutint_common.tools import ToolMissing
 from mutint_import import metadata
-from mutint_import import accessions, reference_store, sample_names, sra, sra_fetch, staging
+from mutint_import import (accessions, reference_roles, reference_store, sample_names,
+                            sra, sra_fetch, staging)
 from mutint_jobs import jobs as jobs_api
 from mutint_jobs import processes
 from mutint_import.upload_session import UploadError
@@ -132,6 +133,13 @@ def breseq(request):
         # sample everybody sees, so a locked experiment offers no form.
         "can_launch": can_edit_experiment(request.user, experiment),
         "lock_refusal": experiment_lock_refusal(experiment),
+        # How this experiment's contigs will be handed to breseq. Shown because the grouping
+        # changes the analysis and lives on another page: a run is hours, and one launched
+        # against the wrong grouping is not corrected by re-annotating anything afterwards.
+        # Empty for a reference that is all plain `-r`, which is the case worth saying
+        # nothing about.
+        "reference_grouping": ("" if reference_roles.is_uniform(experiment)
+                               else reference_roles.describe(experiment)),
         "component": COMPONENT,
         # Everything the page's script needs, in one `json_script` element. It used to
         # interpolate `experiment_id` and `component` into an inline `<script>`; the script is
@@ -391,7 +399,12 @@ def _preflight(experiment, arguments, polymorphism=False, coverage_limit=None):
         reads = os.path.join(scratch, "preflight.fastq")
         with open(reads, "w") as handle:
             handle.write(PREFLIGHT_FASTQ)
-        argv = runner.build_argv(breseq, os.path.join(scratch, "output"), reference,
+        # The same grouping the run will use, rendered into the scratch directory alongside
+        # the throwaway FASTQ: breseq checks that every input exists, so a dry run naming
+        # files that are not there would fail for the wrong reason.
+        references = runner.reference_arguments(
+            experiment, os.path.join(scratch, "reference"), reference)
+        argv = runner.build_argv(breseq, os.path.join(scratch, "output"), references,
                                  arguments, [reads],
                                  processors=runner.default_processors(), dry_run=True,
                                  polymorphism=polymorphism, coverage_limit=coverage_limit)

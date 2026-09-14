@@ -111,13 +111,26 @@ def format_coverage_limit(value):
     return text or "0"
 
 
-def build_argv(breseq, output_dir, reference, arguments, reads, processors=None,
+def build_argv(breseq, output_dir, references, arguments, reads, processors=None,
                dry_run=False, polymorphism=False, coverage_limit=None):
     """The command line for one run.
 
-    Order matters only in that `-o` and `-r` must precede the read files, which are
-    positional. The typed arguments go between, so anything they set overrides the defaults
-    ahead of them and nothing they set can be mistaken for a read file.
+    `references` is an ordered sequence of `(flag, path)` pairs -- breseq takes reference
+    sequences under three of them, and which one a file arrives under changes the analysis:
+    `-r` fits coverage per sequence, `-c` fits one distribution across **every sequence in
+    that file** (a draft assembly's contigs), and `-s` uses the file only for calling
+    junctions. breseq has no way to say this other than by which file a sequence is in, so
+    the grouping is decided by the experiment's per-contig roles and rendered into files by
+    the caller -- see `mutint_import.reference_roles`.
+
+    An experiment whose contigs are all plain references produces exactly
+    `[("-r", <the stored GFF3>)]`, and the command line is then byte-for-byte what it was
+    before roles existed. That is the common case and it is worth keeping literally
+    unchanged rather than merely equivalent; `test_runner` pins it.
+
+    Order matters only in that `-o` and the references must precede the read files, which
+    are positional. The typed arguments go between, so anything they set overrides the
+    defaults ahead of them and nothing they set can be mistaken for a read file.
 
     `polymorphism` is the Population sample checkbox, and adds `-p` unless the box already
     names it in either spelling. `coverage_limit` is the Limit coverage box and adds `-l`
@@ -153,10 +166,62 @@ def build_argv(breseq, output_dir, reference, arguments, reads, processors=None,
     for flag, value in DIVERGENCE_DEFAULTS:
         if flag not in typed:
             argv += [flag, value]
-    argv += ["-o", output_dir, "-r", reference]
+    argv += ["-o", output_dir]
+    for flag, path in references:
+        argv += [flag, path]
     argv += typed
     argv += list(reads)
     return argv
+
+
+def reference_arguments(experiment, directory, stored_reference):
+    """The `(flag, path)` pairs for `experiment`'s reference, writing files where needed.
+
+    breseq can only be told that a set of sequences share a coverage fit by being handed
+    them in one file, and MutInt stores one merged GFF3 per experiment -- so where the
+    contigs do not all play the same part, the files have to be rebuilt from the roles
+    recorded against them.
+
+    **A reference whose contigs are all plain references is passed through untouched**:
+    the stored file itself, under `-r`, with nothing rendered and nothing written. That is
+    every experiment that has never been given a role, so the ordinary case costs nothing
+    and produces the command line it always did.
+
+    `directory` is where rendered files go. The caller owns it -- for a run that is the run
+    directory its own `post_delete` receiver already removes, so this adds no lifecycle.
+    """
+    # Imported here rather than at module scope: this module is imported by `views` and
+    # `tasks` at startup, and `annotation` pulls in the model layer.
+    from mutint_import import annotation, reference_roles
+
+    if reference_roles.is_uniform(experiment):
+        return [("-r", stored_reference)]
+
+    references = annotation.reference_sequences_for(experiment)
+    if references is None:
+        # The stored annotation could not be parsed. One file under `-r` is what this code
+        # did before roles existed, and a run against the right sequences with the wrong
+        # grouping beats refusing to run at all.
+        return [("-r", stored_reference)]
+
+    groups = reference_roles.rendered_groups(experiment, references)
+    return write_reference_files(directory, groups)
+
+
+def write_reference_files(directory, groups):
+    """`[(role, flag, gff3_text)]` -> `[(flag, path)]`, one file per group.
+
+    Named for the role so a person reading the command line in a job log can see which
+    file is which, rather than three files called `1.gff3`.
+    """
+    os.makedirs(directory, exist_ok=True)
+    written = []
+    for role, flag, text in groups:
+        path = os.path.join(directory, "%s.gff3" % role)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        written.append((flag, path))
+    return written
 
 
 def refusal_from(output):

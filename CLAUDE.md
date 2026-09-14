@@ -32,7 +32,7 @@ a project's `.gitmodules` is how a component is not installed.
 
 | file | what |
 |---|---|
-| `runner.py` | pure: both argvs (fastp's and breseq's), the PATH, what counts as usable output, what to keep. It runs nothing -- `mutint_jobs.processes.run_tool` does |
+| `runner.py` | pure: both argvs (fastp's and breseq's), the PATH, what counts as usable output, what to keep, and which reference files breseq is handed. It runs nothing -- `mutint_jobs.processes.run_tool` does |
 | `pairing.py` | pure: breseq's rule for which read files are mates, and which files fastp must not touch |
 | `read_names.py` | pure: what a read file's name says the sample is called, and which files are one sample |
 | `mate_check.py` | pure: whether two files that pair by name really are mates, and how to unpair them if not |
@@ -348,6 +348,44 @@ from it. **Nothing posts the checkbox**: unticked simply sends blank, which is a
 server spells "every read", so the two cannot arrive disagreeing and no boolean joins
 `coverage_limit` on the model. Same rule as `locked_at` in core -- the value is the flag, with
 nothing beside it to hold a second opinion.
+
+### The reference may be several files, and the grouping is core's
+
+`build_argv` takes `references`, an ordered sequence of `(flag, path)` pairs, because breseq
+has three reference options and **the only way to tell it that a set of sequences share a
+coverage fit is to hand them in one file**: `-r` fits per sequence, `-c` fits one
+distribution across every sequence in the file (a draft assembly's contigs), `-s` calls
+junctions only. The store holds one merged GFF3 per experiment, so where the contigs do not
+all play the same part the files have to be rebuilt.
+
+**Which contig is which is not this plugin's to decide.** It is recorded per contig on the
+Reference page and read through `mutint_import.reference_roles` -- see **A contig has a role**
+in mutint-core's CLAUDE.md. This plugin renders and passes; it holds no rule about what a
+contig is, exactly as it holds none about what an SRA accession is.
+
+**A uniform reference is passed through untouched, and that invariant is load-bearing.**
+`runner.reference_arguments` answers `[("-r", <the stored GFF3>)]` when every contig is a
+plain reference -- nothing rendered, nothing written, not even a directory created -- so the
+command line is **byte-for-byte** what it was before roles existed. That is every experiment
+nobody has set a role on, which is nearly all of them, and
+`test_reference_roles.ArgvTestCase` pins the literal argv rather than comparing it against a
+helper that would change with the code.
+
+**Resolved once, before the dry run**, for the reason there is one argv builder at all: a
+preflight that rendered its own files would validate something other than what runs. The
+launch preflight renders into the same `TemporaryDirectory` as its throwaway FASTQ, because
+breseq checks that every input exists and a dry run naming absent files fails for the wrong
+reason.
+
+**The files go in `<run directory>/reference/`**, which `_discard_files` and the model's
+`post_delete` receiver already remove -- so this adds no lifecycle and still registers no
+storage kind.
+
+**Verified against the real breseq, because the risk was not in the argv.** A run given all
+three flags writes **every** sequence into its own `data/reference.gff3`, so
+`sequence_set_digest` still matches the experiment's reference and the sample imports. Had it
+omitted the junction-only sequence, every such run would have been refused at ingest and the
+design would have had to change.
 
 ### Every run is capped on divergence from the reference, so the wrong reference fails fast
 
@@ -748,7 +786,7 @@ cd mutint && ./mutint test mutint_breseq
 
 There is no way to run them from mutint-core: the plugin is not installed there.
 
-**218 tests**, and the end-to-end ones are affordable because of two things. The test runner
+**228 tests**, and the end-to-end ones are affordable because of two things. The test runner
 forces `django.tasks` to its immediate backend, so `.enqueue()` runs inline and one POST
 exercises launch, the subprocess, the ingest and the cleanup. And `tests/fake_breseq.py` is a
 **real executable on disk** rather than a `subprocess.run` patch — the two things most likely

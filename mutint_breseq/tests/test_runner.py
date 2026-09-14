@@ -18,7 +18,7 @@ from mutint_breseq import pairing, runner
 class ArgvTestCase(SimpleTestCase):
     def build(self, arguments="", reads=("r1.fastq",), processors=None,
               polymorphism=False, coverage_limit=None):
-        return runner.build_argv("/bin/breseq", "/out/s1", "/ref.gff3", arguments,
+        return runner.build_argv("/bin/breseq", "/out/s1", [("-r", "/ref.gff3")], arguments,
                                  list(reads), processors=processors,
                                  polymorphism=polymorphism, coverage_limit=coverage_limit)
 
@@ -137,7 +137,7 @@ class DryRunArgvTestCase(TestCase):
     thing. One builder is what guarantees that; this is what says so."""
 
     def test_it_is_the_real_argv_plus_the_flag(self):
-        common = dict(output_dir="/out", reference="/ref.gff3",
+        common = dict(output_dir="/out", references=[("-r", "/ref.gff3")],
                       arguments="-p --polymorphism-minimum-variant-coverage 4",
                       reads=["/r1.fastq", "/r2.fastq"], processors=8)
         real = runner.build_argv("breseq", **common)
@@ -147,7 +147,7 @@ class DryRunArgvTestCase(TestCase):
         self.assertIn(runner.DRY_RUN_FLAG, dry)
 
     def test_it_is_absent_by_default(self):
-        argv = runner.build_argv("breseq", "/out", "/ref.gff3", "", ["/r1.fastq"])
+        argv = runner.build_argv("breseq", "/out", [("-r", "/ref.gff3")], "", ["/r1.fastq"])
         self.assertNotIn(runner.DRY_RUN_FLAG, argv)
 
 

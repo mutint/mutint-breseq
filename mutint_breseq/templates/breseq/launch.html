@@ -169,14 +169,31 @@
             samples, 60- to 80-fold coverage is usually enough to predict all mutations.
         </small>
 
+        {% if reference_grouping %}
+            {% comment %} Only when the contigs do not all play the same part. A reference
+               that is entirely -r is what breseq has always been handed, and saying so
+               every time would make the line furniture rather than information. {% endcomment %}
+            <div class="form-group breseq-reference-grouping">
+                <label>Reference</label>
+                <p class="help-block">
+                    This experiment's sequences are passed to breseq as
+                    <b>{{ reference_grouping }}</b>.
+                    <a href="{% url 'reference_view' %}?experiment_id={{ experiment_id }}">Change
+                        how they are grouped</a>
+                </p>
+            </div>
+        {% endif %}
+
         <div class="form-group">
             <label for="breseq-arguments">breseq arguments <small>(optional)</small></label>
             <input type="text" class="form-control" id="breseq-arguments"
                    placeholder="e.g. -p --polymorphism-minimum-variant-coverage 4"
                    autocomplete="off">
             <small class="help-block">
-                Passed to breseq as typed. <code>-o</code> and <code>-r</code> are supplied
-                for you, and <code>-j</code> defaults to every processor on this machine
+                Passed to breseq as typed. <code>-o</code> and the reference options
+                (<code>-r</code>, and <code>-c</code> or <code>-s</code> where this
+                experiment's sequences are grouped that way) are supplied for you, and
+                <code>-j</code> defaults to every processor on this machine
                 but two, unless you name one here. The two are left for the web server, the
                 database and any other run going at the same time. Every run also gets
                 <code>--max-evidence-items 5000 --max-percent-divergence 1.0</code>, so reads
