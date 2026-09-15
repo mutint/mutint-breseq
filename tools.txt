@@ -20,7 +20,8 @@
 # short hash as its *build*, so `=*=<build>` names exactly one artifact.
 #
 # **The build is not always just the hash**: a rebuild of the same commit gets a `_N` suffix,
-# and the current one is `g9aab25c1_1`. `dev424` is published twice, as `gab1f4511` and
+# and the current one is `g67b6320e_2` -- a `_2`, so copying the hash or guessing `_1` both
+# name nothing. `dev424` is published twice, as `gab1f4511` and
 # `gab1f4511_1`, which is what makes this worth stating -- the hash alone is not a spec. A
 # build string that matches nothing does not degrade to something older, it fails the *whole*
 # tools solve, and with it `./mutint start`: measured, `=*=g9aab25c1` (no suffix) stops with
@@ -30,7 +31,10 @@
 #     curl -s https://barricklab.github.io/conda/osx-arm64/repodata.json
 #
 # and check the platform you are *not* on as well -- one solve covers every component, and CI
-# runs on linux-64.
+# runs on linux-64. Dry-running that solve **from macOS needs
+# `CONDA_OVERRIDE_GLIBC=2.28 CONDA_OVERRIDE_LINUX=5.10`**: without them micromamba cannot
+# detect the target's virtual packages and refuses with `__glibc >=2.17 ... is missing on the
+# system`, which reads exactly like the package being unavailable for linux-64 and is not.
 #
 # `=<version>=<build>` would pin the same artifact and is deliberately not used: it is two
 # coupled tokens that must be edited together and mean nothing if they disagree.
@@ -53,11 +57,42 @@
 # evidence a polymorphic run reports; it changes no flag, so nothing in this plugin had to
 # move with it.
 #
-# gf7100f9a, the build pinned below, turns breseq's long-standing divergence *warning* into
-# an optional hard stop: `--max-evidence-items` and `--max-percent-divergence`, both off in
-# breseq itself. This plugin turns them on (5000 items, 1.0%), because a person who drops
-# reads against the wrong reference would otherwise get a run that spends hours annotating
-# hundreds of thousands of spurious mutations and then imports every one of them.
+# **Read the build off the channel, and defeat the cache while you do it.** GitHub Pages
+# serves this channel with `cache-control: max-age=600`, so a plain `curl` can hand back an
+# index that predates a build published minutes ago -- which happened while pinning ge1bbc07f,
+# and read as "there is no new version". Send `Cache-Control: no-cache` and a cache-busting
+# query. And **`cnery-prerelease` is `noarch`**: it is in neither `osx-arm64/repodata.json`
+# nor `linux-64/repodata.json`, so looking for it there finds nothing and proves nothing.
+#
+# gf7100f9a turns breseq's long-standing divergence *warning* into an optional hard stop:
+# `--max-evidence-items` and `--max-percent-divergence`, both off in breseq itself. This
+# plugin turns them on (5000 items, 1.0%), because a person who drops reads against the wrong
+# reference would otherwise get a run that spends hours annotating hundreds of thousands of
+# spurious mutations and then imports every one of them.
+#
+# **g67b6320e, the build pinned below, is where copy-number prediction and `-c` can coexist.**
+# breseq depends on `cnery-prerelease` now and *calls* it, so CN prediction runs on every
+# ordinary run rather than being skipped for want of the tool. Two things had to land together
+# for that to be usable here, and the build in between shows why this list is checked by
+# running it rather than by reading a changelog:
+#
+#   * ge1bbc07f calls `CNery --group-table <tsv> -o <dir>`, and CNery leaves the
+#     origin/terminus columns **empty** for a sequence in a `-c` group -- it does not measure
+#     GC skew for one. breseq's `read_cnery_windows` read those with `from_string<double>`, so
+#     every run using `-c` died on `Attempt to convert empty string`, hours in, with no
+#     `output.gd` and no `summary.json`. Measured here against the same inputs that pass on
+#     gf7100f9a and on g67b6320e; `-r` alone was unaffected, which is why it is easy to miss.
+#   * ge1bbc07f also declared `cnery-prerelease >=0.1.0.dev122`, which the *older* dev124
+#     satisfies -- so a fresh solve worked and an **existing** `env/tools` kept dev124 and
+#     failed with `CNery: error: unrecognized arguments: --group-table`. That is the shape to
+#     watch for: a constraint loose enough that only a prefix built from scratch is correct,
+#     which is every developer's machine and, through `restore-keys`, CI. g67b6320e tightens
+#     it to `>=0.1.0.dev127`, and installing the spec below into a prefix holding dev124 does
+#     upgrade it -- verified, which is why no `cnery-prerelease` line is needed here.
+#
+# `-c` is not incidental to this plugin: `runner.reference_arguments` emits it for any
+# experiment whose contigs carry the Contig role, so "CN evidence" and "draft assembly" are a
+# combination MutInt produces by default. A breseq that cannot do both is not one to pin.
 #
 # It was unpinned, on the reasoning that a version cannot distinguish these builds. That is
 # true of the version and not of the build, and unpinned meant a checkout tracked master on a
@@ -77,7 +112,7 @@
 # so `tool_path("breseq")` is not sufficient on its own: the subprocess needs env/tools/bin
 # on PATH or breseq stops with `Required executable "bowtie2" not found`, having exited 0.
 # mutint_breseq/runner.py `tool_environment()` is what builds that PATH.
-https://barricklab.github.io/conda/::breseq-prerelease=*=gf7100f9a_1
+https://barricklab.github.io/conda/::breseq-prerelease=*=g67b6320e_2
 
 # fastp trims adapters off the reads before breseq sees them, when a run asks for it -- which
 # is the default. bioconda has it, so no channel prefix; `--detect_adapter_for_pe` has been in
