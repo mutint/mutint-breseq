@@ -1,18 +1,8 @@
-<p><b>Run breseq</b> from the browser. Drop an experiment's FASTQ read files on
-    <code>/breseq/</code> or name them by SRA accession &mdash; a run, a sample, an experiment
-    or a study, fetched from ENA's mirror &mdash; name the sample, and breseq is run in the background against the
-    reference genome that experiment already holds. What it produces is imported exactly as a
-    breseq folder dropped on the Add Data page would be, so the sample that appears is
-    indistinguishable from one analyzed elsewhere and uploaded.</p>
-<p>One launch is one sample: every file dropped or fetched is that sample's reads — both mates
-    of a pair, or several lanes — unless the input type says each file set and each accession
-    is a sample of its own. The single arguments box is passed through to breseq as typed, so
-    anything its own documentation describes is available; the processor count defaults to
-    every core on the machine but two, unless you set it yourself. Reads are adapter-trimmed with
-    fastp first unless you deselect the box, pairs together and long reads left alone, and
-    <em>pair</em> means what it means to breseq.</p>
-<p>The work runs on the task queue rather than in the request, because a real genome takes
-    hours. <b>That means a worker has to be running</b> — <code>./mutint db_worker</code> —
-    and the run list says so when nothing has picked a job up. After a successful import only
-    breseq's own HTML report is kept: the reads are large, and everything else worth having is
-    already in the store under the sample.</p>
+<p>Adds an import function that runs <a href="https://github.com/barricklab/breseq"><i>breseq</i></a> on
+    input FASTQ read files to populate a sample with mutations and an aligned BAM file. HTML files produced
+    by <i>breseq</i> that show evidence for mutation predictions are also stored so they can be viewed.</p>
+
+<p><b>Citation:</b> Deatherage, D.E., Barrick, J.E. (2014) Identification of mutations in
+    laboratory-evolved microbes from next-generation sequencing data using <i>breseq</i>.
+    <i>Methods Mol. Biol.</i> <b>1151</b>:165-188.
+    <a href="https://doi.org/10.1007/978-1-4939-0554-6_12">https://doi.org/10.1007/978-1-4939-0554-6_12</a></p>
