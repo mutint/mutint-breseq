@@ -379,5 +379,5 @@ def cleanup_after_import(run_dir, output_dir):
     than trusting that.
     """
     shutil.rmtree(os.path.join(run_dir, "reads"), ignore_errors=True)
-    shutil.rmtree(os.path.join(run_dir, "trimmed"), ignore_errors=True)
+    shutil.rmtree(os.path.join(run_dir, "steps"), ignore_errors=True)
     shutil.rmtree(output_dir, ignore_errors=True)

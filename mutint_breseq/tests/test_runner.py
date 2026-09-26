@@ -289,12 +289,12 @@ class CleanupTestCase(SimpleTestCase):
         os.makedirs(os.path.join(self.output_dir, "data"))
         os.makedirs(os.path.join(self.output_dir, "output", "evidence"))
         os.makedirs(os.path.join(self.run_dir, "reads"))
-        os.makedirs(os.path.join(self.run_dir, "trimmed"))
+        os.makedirs(os.path.join(self.run_dir, "steps", "trim"))
         for path in (os.path.join(self.output_dir, "data", "reference.bam"),
                      os.path.join(self.output_dir, "output", "index.html"),
                      os.path.join(self.output_dir, "output", "evidence", "e.html"),
                      os.path.join(self.run_dir, "reads", "r1.fastq"),
-                     os.path.join(self.run_dir, "trimmed", "r1.fastq")):
+                     os.path.join(self.run_dir, "steps", "trim", "r1.fastq")):
             with open(path, "w") as handle:
                 handle.write("x")
 
@@ -308,7 +308,7 @@ class CleanupTestCase(SimpleTestCase):
         runner.cleanup_after_import(self.run_dir, self.output_dir)
 
         self.assertFalse(os.path.exists(os.path.join(self.run_dir, "reads")))
-        self.assertFalse(os.path.exists(os.path.join(self.run_dir, "trimmed")))
+        self.assertFalse(os.path.exists(os.path.join(self.run_dir, "steps")))
         self.assertFalse(os.path.exists(self.output_dir))
 
     def test_a_run_with_no_output_directory_is_fine(self):

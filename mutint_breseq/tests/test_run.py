@@ -103,7 +103,7 @@ class RunTestCase(TestCase):
             fastq_fixture.write(os.path.join(root, name), count=4)
 
     def _launch(self, sample="s1", population="", time_point="", arguments="",
-                names=("s1_R1.fastq", "s1_R2.fastq"), trim_reads=None, content=None,
+                names=("s1_R1.fastq", "s1_R2.fastq"), read_steps=None, content=None,
                 population_sample=None, coverage_limit=None, input_mode=None,
                 sample_name=None, metadata=None):
         """The endpoint takes the three parts of a coordinate, not a joined name: the server
@@ -112,8 +112,8 @@ class RunTestCase(TestCase):
         body = {"upload_id": str(session.id), "sample": sample,
                 "population": population, "time_point": time_point,
                 "arguments": arguments}
-        if trim_reads is not None:
-            body["trim_reads"] = trim_reads
+        if read_steps is not None:
+            body["read_steps"] = read_steps
         if population_sample is not None:
             body["population_sample"] = population_sample
         if coverage_limit is not None:
@@ -371,7 +371,7 @@ class RunTestCase(TestCase):
     def test_a_pair_is_trimmed_together_and_breseq_reads_the_trimmed_copies(self):
         response = self._launch(names=("s1_R1.fastq", "s1_R2.fastq"))
         run = BreseqRun.objects.get(pk=response.json()["run_ids"][0])
-        self.assertTrue(run.trim_reads)
+        self.assertIn("trim", run.read_steps, "trimming is on by default")
 
         calls = self._recorded_fastp()
         self.assertEqual(1, len(calls), "one pair is one fastp call")
@@ -418,9 +418,9 @@ class RunTestCase(TestCase):
             self.assertNotIn("--detect_adapter_for_pe", call["argv"])
 
     def test_trimming_can_be_switched_off(self):
-        response = self._launch(trim_reads=False)
+        response = self._launch(read_steps=[])
         run = BreseqRun.objects.get(pk=response.json()["run_ids"][0])
-        self.assertFalse(run.trim_reads)
+        self.assertEqual([], run.read_steps)
         self.assertEqual([], self._recorded_fastp())
         breseq = self._recorded_argv()["argv"]
         self.assertEqual(run.reads_dir(), os.path.dirname(breseq[-1]))
@@ -462,10 +462,34 @@ class RunTestCase(TestCase):
         self.assertEqual([], [call for call in self._recorded_breseq()
                               if not call["dry_run"]])
 
-    def test_a_missing_fastp_says_what_installs_it(self):
+    def test_asking_for_trimming_without_fastp_is_refused_at_launch(self):
+        """Before the upload is claimed, and naming what installs it -- not a run that fails
+        on the worker once the reads have been moved out of staging."""
         os.remove(os.path.join(self.tools, "bin", "fastp"))
         with mock.patch.dict(os.environ, {"PATH": ""}):
-            self.assertEqual(self._launch().status_code, 200)
+            response = self._launch(read_steps=["trim"])
+        self.assertEqual(400, response.status_code)
+        self.assertEqual("read_steps", response.json()["field"])
+        self.assertIn("fastp is not installed", response.json()["error"])
+        self.assertFalse(BreseqRun.objects.exists())
+
+    def test_without_fastp_the_default_leaves_trimming_off(self):
+        """What the page would have ticked: a step that cannot run here is drawn unticked,
+        and a launch that names no steps takes the page's defaults."""
+        os.remove(os.path.join(self.tools, "bin", "fastp"))
+        with mock.patch.dict(os.environ, {"PATH": ""}):
+            response = self._launch()
+        run = BreseqRun.objects.get(pk=response.json()["run_ids"][0])
+        self.assertNotIn("trim", run.read_steps)
+
+    def test_a_fastp_gone_by_the_time_the_worker_runs_fails_the_run_saying_so(self):
+        """The launch asked the web host; the worker is another machine, or a later hour."""
+        os.remove(os.path.join(self.tools, "bin", "fastp"))
+        with mock.patch.dict(os.environ, {"PATH": ""}), \
+                mock.patch("mutint_breseq.steps.trim_available", return_value=(True, "")), \
+                mock.patch("mutint_common.read_step_registry.ReadStep.available",
+                           return_value=(True, "")):
+            self.assertEqual(self._launch(read_steps=["trim"]).status_code, 200)
         run = BreseqRun.objects.get()
         self.assertEqual(run.status, STATUS_FAILED)
         self.assertIn("fastp is not installed", run.error)
@@ -476,10 +500,90 @@ class RunTestCase(TestCase):
         self.assertEqual(run.status, STATUS_IMPORTED, run.error)
         self.assertFalse(os.path.exists(run.trimmed_dir()), "the trimmed reads were kept")
 
-    def test_the_run_list_says_whether_the_reads_were_trimmed(self):
-        self._launch(trim_reads=False)
+    def test_the_run_list_says_what_was_done_to_the_reads(self):
+        self._launch(read_steps=[])
+        self._launch(read_steps=["trim"])
         rows = self.client.get("/breseq/runs?experiment_id=%s" % self.experiment.id).json()
-        self.assertFalse(rows["runs"][0]["trim_reads"])
+        self.assertEqual([["Trim reads (fastp)"], []],
+                         [row["read_steps"] for row in rows["runs"]])
+
+    # --- other components' read steps ------------------------------------------------------
+
+    def _register_inspect_step(self):
+        """A step of another component's, as a FastQC report would be: it only looks."""
+        from django.apps import apps
+        from mutint_common.read_step_registry import (
+            STAGE_INSPECT, register_read_step, unregister_read_step)
+
+        seen = {"reads": None, "fastp_calls": None, "attached": [], "discarded": []}
+
+        def run(ctx):
+            seen["reads"] = [os.path.basename(path) for path in ctx.reads]
+            seen["dirs"] = sorted({os.path.dirname(path) for path in ctx.reads})
+            seen["fastp_calls"] = len(self._recorded_fastp())
+            ctx.write("t_qc looked at %d files" % len(ctx.reads))
+
+        register_read_step(apps.get_app_config("mutint_breseq"), "t_qc", "Test QC", run,
+                           stage=STAGE_INSPECT, default=False,
+                           attach=lambda producer, sample: seen["attached"].append(
+                               (producer, sample.pk)),
+                           discard=lambda producer: seen["discarded"].append(producer))
+        self.addCleanup(unregister_read_step, "t_qc")
+        return seen
+
+    def test_an_inspect_step_sees_the_reads_as_uploaded_before_fastp_runs(self):
+        seen = self._register_inspect_step()
+
+        response = self._launch(read_steps=["trim", "t_qc"])
+
+        run = BreseqRun.objects.get(pk=response.json()["run_ids"][0])
+        self.assertEqual(run.status, STATUS_IMPORTED, run.error)
+        self.assertEqual(["t_qc", "trim"], run.read_steps, "stored in the order they ran")
+        self.assertEqual(["s1_R1.fastq", "s1_R2.fastq"], seen["reads"])
+        self.assertEqual([run.reads_dir()], seen["dirs"], "it saw the untrimmed copies")
+        self.assertEqual(0, seen["fastp_calls"], "fastp ran before the inspect step")
+        self.assertIn("t_qc looked at 2 files", run.log)
+
+    def test_a_step_is_told_which_sample_its_reads_became(self):
+        seen = self._register_inspect_step()
+
+        response = self._launch(read_steps=["t_qc"])
+
+        run = BreseqRun.objects.get(pk=response.json()["run_ids"][0])
+        self.assertEqual([("mutint_breseq:%d" % run.pk, run.sample_id)], seen["attached"])
+        self.assertEqual([], seen["discarded"])
+
+    def test_a_failed_run_tells_its_steps_to_discard_what_they_kept(self):
+        seen = self._register_inspect_step()
+        os.environ["FAKE_FASTP_FAIL"] = "2"
+        self.addCleanup(os.environ.pop, "FAKE_FASTP_FAIL", None)
+
+        self._launch(read_steps=["t_qc", "trim"])
+
+        run = BreseqRun.objects.get()
+        self.assertEqual(run.status, STATUS_FAILED)
+        self.assertEqual(["mutint_breseq:%d" % run.pk], seen["discarded"])
+        self.assertEqual([], seen["attached"])
+
+    def test_a_step_not_ticked_does_not_run(self):
+        seen = self._register_inspect_step()
+        self._launch(read_steps=["trim"])
+        self.assertIsNone(seen["reads"])
+
+    def test_an_unknown_step_is_refused_before_the_upload_is_claimed(self):
+        response = self._launch(read_steps=["no_such_step"])
+
+        self.assertEqual(400, response.status_code)
+        self.assertEqual("read_steps", response.json()["field"])
+        self.assertIn("no_such_step", response.json()["error"])
+        self.assertFalse(BreseqRun.objects.exists())
+
+    def test_the_launcher_draws_a_checkbox_per_step(self):
+        self._register_inspect_step()
+        page = self.client.get("/breseq/?experiment_id=%s" % self.experiment.id)
+        self.assertContains(page, 'value="trim"')
+        self.assertContains(page, 'value="t_qc"')
+        self.assertContains(page, "Test QC")
 
     def test_typed_arguments_reach_breseq(self):
         self._launch(arguments="-p --polymorphism-minimum-variant-coverage 4")
@@ -576,12 +680,12 @@ class RunTestCase(TestCase):
             fastq_fixture.write(os.path.join(root, name), count=count, mate=index + 1)
         return session
 
-    def _launch_records(self, counts, trim_reads=None, names=("s1_R1.fastq", "s1_R2.fastq")):
+    def _launch_records(self, counts, read_steps=None, names=("s1_R1.fastq", "s1_R2.fastq")):
         session = self._stage_records(counts, names=names)
         body = {"upload_id": str(session.id), "sample": "s1",
                 "population": "", "time_point": "", "arguments": ""}
-        if trim_reads is not None:
-            body["trim_reads"] = trim_reads
+        if read_steps is not None:
+            body["read_steps"] = read_steps
         return self.client.post(
             "/breseq/launch?experiment_id=%s" % self.experiment.id,
             data=json.dumps(body), content_type="application/json")
@@ -625,7 +729,7 @@ class RunTestCase(TestCase):
 
     def test_the_check_runs_when_trimming_is_off(self):
         # fastp never appears, and breseq would truncate the pair on its own.
-        self._launch_records((12, 7), trim_reads=False)
+        self._launch_records((12, 7), read_steps=[])
         run = BreseqRun.objects.get()
 
         self.assertEqual(run.status, STATUS_IMPORTED, run.error)

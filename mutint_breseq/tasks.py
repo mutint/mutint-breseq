@@ -28,6 +28,15 @@ from django.tasks import task
 from django.utils import timezone
 
 from mutint_common import store
+from mutint_common.read_step_registry import (
+    ReadStepContext,
+    ReadStepFailed,
+    attach_read_steps,
+    clean_selection,
+    discard_read_steps,
+    get_step,
+    run_read_steps,
+)
 from mutint_common.tools import ToolMissing
 from mutint_import import breseq_folder, import_lock, sra_fetch
 from mutint_import.import_lock import ImportInProgress
@@ -78,11 +87,12 @@ def _cancelled(run, log=None):
     run.save(update_fields=["status", "error", "finished_at", "log"])
 
     _discard_files(run)
+    discard_read_steps(run.read_steps, run.producer_key())
     logger.info("breseq run %s cancelled", run.pk)
 
 
 def _discard_files(run):
-    """The reads, the trimmed reads and breseq's output. Every ending calls this.
+    """The reads, what the read steps wrote and breseq's output. Every ending calls this.
 
     A failure used to keep them, on the reasoning that a failed run is exactly when the reads
     matter. What was kept in practice was gigabytes per failed run that nobody looked at,
@@ -90,7 +100,7 @@ def _discard_files(run):
     actually reads. A run that has to be re-done is re-launched from the reads it came from.
     """
     shutil.rmtree(run.reads_dir(), ignore_errors=True)
-    shutil.rmtree(run.trimmed_dir(), ignore_errors=True)
+    shutil.rmtree(run.steps_dir(), ignore_errors=True)
     shutil.rmtree(run.output_dir(), ignore_errors=True)
 
 
@@ -107,6 +117,9 @@ def _fail(run, message, log=None):
         run.log = log
     run.save(update_fields=["status", "error", "finished_at", "log"])
     _discard_files(run)
+    # Every step that kept something about these reads is told the run came to nothing, so a
+    # QC report does not outlive the run it was made for with no sample to hang off.
+    discard_read_steps(run.read_steps, run.producer_key())
 
 
 def _tail(queue_id, run):
@@ -196,47 +209,6 @@ def _split_mismatched_pairs(run, reads, paired, log, queue_id):
     return reads
 
 
-class _FastpFailed(Exception):
-    """fastp exited nonzero. The run's log has its account; this carries only the reason."""
-
-
-def _trim_reads(run, fastp, reads, paired, deadline, log, queue_id):
-    """Run fastp over the reads, set by set. Returns what breseq should read.
-
-    The sets are breseq's own -- see `pairing.py` -- so a pair is trimmed as a pair and the
-    trimmed files, keeping their names, pair again when breseq sees them. Sets fastp should
-    not touch are passed through as the original path, and the log says so.
-
-    Raises `processes.Cancelled`, `subprocess.TimeoutExpired`, `OSError` as the breseq stage
-    does, and `_FastpFailed` for a nonzero exit.
-
-    `log` is the job's, and fastp writes into it directly. The lines this adds are the ones
-    fastp cannot: which sets were skipped and why, which is a decision this made rather than
-    anything fastp printed.
-    """
-    out_dir = store.ensure_dir(run.trimmed_dir())
-    env = runner.tool_environment()
-    replacement = {}
-    for plan in runner.plan_trimming(reads, paired=paired):
-        names = ", ".join(os.path.basename(path) for path in plan.read_set.files)
-        if not plan.trim:
-            logs.write(log, "fastp: left %s untrimmed (%s)" % (names, plan.reason))
-            continue
-        argv = runner.build_fastp_argv(fastp, plan.read_set, out_dir,
-                                       threads=runner.fastp_threads())
-        logger.info("breseq run %s trimming: %s", run.pk, " ".join(argv))
-        returncode = processes.run_tool(
-            argv, log, env=env, timeout=max(1, deadline - time.monotonic()),
-            is_cancelled=lambda: jobs.is_cancelled(queue_id), what="fastp")
-        if returncode != 0:
-            raise _FastpFailed(
-                "fastp exited %d on %s. Its output is in this job's log."
-                % (returncode, names))
-        for path in plan.read_set.files:
-            replacement[path] = runner.trimmed_path(out_dir, path)
-    return [replacement.get(path, path) for path in reads]
-
-
 def _wait_for_import_lock(holder, task_result_id=None):
     """Hold the import lock, waiting rather than failing if somebody else has it.
 
@@ -260,6 +232,14 @@ def _wait_for_import_lock(holder, task_result_id=None):
             if time.monotonic() >= deadline:
                 raise
             time.sleep(LOCK_POLL_SECONDS)
+
+
+def _tool_name(expired):
+    """The command a `TimeoutExpired` from `run_tool` was about, by its basename."""
+    command = getattr(expired, "cmd", None)
+    if isinstance(command, (list, tuple)) and command:
+        return os.path.basename(str(command[0]))
+    return "A read step"
 
 
 def _queue_id(context, run):
@@ -419,35 +399,44 @@ def run_breseq(context, run_id):
             _cancelled(run, log=_tail(queue_id, run))
             return None
 
-        if run.trim_reads:
-            try:
-                fastp = runner.fastp_path()
-            except ToolMissing as missing:
-                _fail(run, str(missing))
-                raise
-            # `paired` is computed above, before the mate check, because both need it:
-            # `--no-paired-mapping` makes breseq treat every file as its own set, so fastp
-            # must too, and so must anything deciding whether two files claim to be mates.
-            try:
-                reads = _trim_reads(run, fastp, reads, paired, deadline, log, queue_id)
-            except processes.Cancelled:
-                _cancelled(run, log=_tail(queue_id, run))
-                return None
-            except subprocess.TimeoutExpired:
-                _fail(run, "fastp did not finish within %d seconds." % _timeout(),
-                      log=_tail(queue_id, run))
-                raise
-            except OSError as exc:
-                _fail(run, "fastp could not be started: %s" % exc, log=_tail(queue_id, run))
-                raise
-            except _FastpFailed as failed:
-                _fail(run, str(failed), log=_tail(queue_id, run))
-                raise RuntimeError("fastp failed for run %s: %s" % (run.pk, failed))
-            # The fourth place that polls. A cancel that landed while fastp ran its last file
-            # would otherwise start an hours-long breseq that nobody wants.
-            if jobs.is_cancelled(queue_id):
-                _cancelled(run, log=_tail(queue_id, run))
-                return None
+        # The read steps: whatever was ticked on the launch page, from this plugin (fastp
+        # trimming) and from any other installed component (a FastQC report, say), run through
+        # core's registry in its order -- every step that only looks at the reads, then every
+        # step that rewrites them. After the mate check, so a pair it took apart reaches every
+        # step as the two single-end files breseq will see.
+        #
+        # A name stored on the row whose component has since been uninstalled is dropped
+        # rather than failing the run: there is nothing left that could run it.
+        try:
+            selected = clean_selection(run.read_steps)
+        except ValueError:
+            selected = clean_selection([name for name in run.read_steps
+                                        if get_step(name) is not None])
+        ctx = ReadStepContext(
+            experiment=experiment, sample_name=run.sample_name, reads=reads, paired=paired,
+            producer=run.producer_key(), work_dir=run.directory(), log=log,
+            deadline=deadline, is_cancelled=lambda: jobs.is_cancelled(queue_id),
+            display_name=mate_check.uploaded_name,
+            note=lambda sentence: _note(run, sentence, log))
+        try:
+            reads = run_read_steps(selected, ctx)
+        except processes.Cancelled:
+            # Also what `run_read_steps` raises for a cancel that landed between two steps --
+            # or after the last one, which would otherwise start an hours-long breseq that
+            # nobody wants.
+            _cancelled(run, log=_tail(queue_id, run))
+            return None
+        except subprocess.TimeoutExpired as expired:
+            _fail(run, "%s did not finish within %d seconds."
+                       % (_tool_name(expired), _timeout()), log=_tail(queue_id, run))
+            raise
+        except OSError as exc:
+            _fail(run, "A read step could not be started: %s" % exc,
+                  log=_tail(queue_id, run))
+            raise
+        except ReadStepFailed as failed:
+            _fail(run, str(failed), log=_tail(queue_id, run))
+            raise RuntimeError("a read step failed for run %s: %s" % (run.pk, failed))
 
         argv = runner.build_argv(breseq, run.output_dir(), references, run.arguments, reads,
                                  processors=runner.default_processors(),
@@ -525,6 +514,9 @@ def run_breseq(context, run_id):
     if run.population_sample:
         _mark_population_sample(sample)
     _record_read_sources(sample, reads, paired, downloaded)
+    # The sample exists now, so whatever a read step kept about these reads can say which
+    # sample it belongs to.
+    attach_read_steps(run.read_steps, run.producer_key(), sample)
     # Everything worth keeping -- data/'s four files and breseq's HTML report -- is already in
     # the store under the sample, put there by the importer above.
     runner.cleanup_after_import(run.directory(), run.output_dir())

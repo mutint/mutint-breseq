@@ -72,14 +72,15 @@ class BreseqRun(models.Model):
     sample_name = models.CharField(max_length=200)
     # The one box, verbatim as typed. Split with shlex at run time, never handed to a shell.
     arguments = models.TextField(blank=True)
-    # Whether fastp trimmed the reads before breseq saw them. On by default; recorded per run
-    # rather than read from a setting so a row says what was actually done to its reads.
-    # Runs from before the option existed carry False, which is the truth about them.
-    trim_reads = models.BooleanField(default=True)
+    # The read steps ticked at launch, by name -- `mutint_common.read_step_registry`'s, so this
+    # plugin's own `trim` (fastp) and any installed component's (a FastQC report) alike, run in
+    # the registry's order before breseq sees the reads. Recorded per run rather than read from
+    # a setting so a row says what was actually done to its reads.
+    read_steps = models.JSONField(default=list)
     # Whether this was launched as a population -- a whole evolving population sequenced
     # together -- rather than a clone. Two effects, deliberately joined: `-p` goes on breseq's
     # command line, and the sample the import produces is recorded `is_clonal=False`. Kept per
-    # run for the reason `trim_reads` is: the row says what was actually asked for. Runs from
+    # run for the reason `read_steps` is: the row says what was actually asked for. Runs from
     # before the option existed carry False, which is the truth about them.
     population_sample = models.BooleanField(default=False)
     # breseq's `-l`: analyze only enough reads to reach this fold coverage. **Null is a real
@@ -146,9 +147,19 @@ class BreseqRun(models.Model):
     def reads_dir(self):
         return os.path.join(self.directory(), "reads")
 
+    def steps_dir(self):
+        """Where the read steps write -- `ReadStepContext.scratch_dir` makes one directory per
+        step under here. Removed at every ending, as `reads/` is."""
+        return os.path.join(self.directory(), "steps")
+
     def trimmed_dir(self):
         """Where fastp writes. Same file names as `reads/`, so breseq pairs them identically."""
-        return os.path.join(self.directory(), "trimmed")
+        from mutint_breseq.steps import TRIM
+        return os.path.join(self.steps_dir(), TRIM)
+
+    def producer_key(self):
+        """What a read step keys its rows by until it is told which sample they became."""
+        return "%s:%s" % (COMPONENT, self.pk)
 
     def output_dir(self):
         """breseq's ``-o``. **Named for the sample**, which is not decoration.

@@ -21,7 +21,7 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST
 
 import mutint_sample.views.common
-from mutint_common import preferences, store
+from mutint_common import preferences, read_step_registry, store
 from mutint_common.fileserve import serve_file
 from mutint_common.util import get_user_context
 from mutint_experiment.models import Experiment
@@ -155,6 +155,8 @@ def breseq(request):
             "preferences": _embedded_preferences(request.user),
         },
         "runs": _run_rows(experiment),
+        # One checkbox per registered read step, fastp's among them.
+        "read_step_choices": _read_step_choices(),
         # What the Population and Time point boxes offer. Put in the context rather than
         # fetched, which is what every other picker in the suite does -- and these change
         # only when a sample is imported, which reloads the page anyway.
@@ -240,6 +242,43 @@ def _queue_status(run):
         return ""
 
 
+def _step_labels(names):
+    labels = []
+    for name in names or []:
+        step = read_step_registry.get_step(name)
+        labels.append(step.label if step is not None else name)
+    return labels
+
+
+def _read_step_choices():
+    """Every registered read step as the launch page draws it: a checkbox, ticked by default
+    where the step says so and can run, disabled with the reason where it cannot."""
+    choices = []
+    for step in read_step_registry.steps():
+        available, why = step.available()
+        choices.append({"name": step.name, "label": step.label,
+                        "description": step.description,
+                        "checked": bool(step.default and available),
+                        "available": available, "why": why})
+    return choices
+
+
+def _read_steps(payload):
+    """The read steps a launch asks for, checked and in run order. Raises ValueError.
+
+    Absent means every step that is on by default and can run here -- what the page would
+    have ticked. Named means exactly those, and a name that cannot run here is refused rather
+    than dropped, because somebody asked for it.
+    """
+    if "read_steps" not in payload:
+        return [choice["name"] for choice in _read_step_choices() if choice["checked"]]
+    names = payload.get("read_steps")
+    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+        raise ValueError("read_steps must be a list of step names.")
+    return [step.name for step in
+            read_step_registry.clean_selection(names, check_available=True)]
+
+
 def _run_rows(experiment):
     runs = list(BreseqRun.objects.filter(experiment=experiment).select_related("sample"))
     # One query for every run's log link, through core rather than by querying `Job` here: a
@@ -260,7 +299,9 @@ def _run_rows(experiment):
                             "runs": [run_entry.get("accession", "")
                                      for run_entry in plan.get("runs") or []]}
                            for plan in (run.accessions or [])],
-            "trim_reads": run.trim_reads,
+            # What was done to the reads before breseq saw them, by each step's label -- a
+            # step whose component has since been uninstalled is shown by its stored name.
+            "read_steps": _step_labels(run.read_steps),
             "population_sample": run.population_sample,
             "coverage_limit": run.coverage_limit,
             "status": run.status,
@@ -440,8 +481,9 @@ def launch(request):
     """Take a staged drop, a list of SRA accessions, or both, and start a run.
 
     Body: {upload_id, accessions, input_mode, population, time_point, sample, metadata,
-    arguments, trim_reads, population_sample, coverage_limit}; `trim_reads` defaults to true,
-    `population_sample` to false, and `coverage_limit` is blank for every read. `upload_id`
+    arguments, read_steps, population_sample, coverage_limit}; `read_steps` is a list of
+    `mutint_common.read_step_registry` names and defaults to the steps on by default that can
+    run here, `population_sample` to false, and `coverage_limit` is blank for every read. `upload_id`
     is blank when nothing was dropped -- the page opens no session for a launch that has no
     bytes to stage -- and `accessions` is blank when nothing was typed; one of them is not.
 
@@ -511,6 +553,14 @@ def launch(request):
         coverage_limit = _coverage_limit(payload.get("coverage_limit"))
     except CoverageLimitError as refusal:
         return JsonResponse({"error": str(refusal), "field": "coverage_limit"}, status=400)
+
+    # The read steps -- trimming, a QC report, whatever the installed components offer --
+    # checked now and not in the worker, so a step whose tool is not installed is refused
+    # beside its checkbox before anything is uploaded or claimed.
+    try:
+        read_steps = _read_steps(payload)
+    except ValueError as refusal:
+        return JsonResponse({"error": str(refusal), "field": "read_steps"}, status=400)
 
     # SRA accessions, resolved against ENA now and not in the worker, for the reason the
     # preflight below runs before the claim: a typo should cost the round trip that caught it
@@ -628,7 +678,7 @@ def launch(request):
                 created_by=request.user if request.user.is_authenticated else None,
                 sample_name=sample.name,
                 arguments=arguments,
-                trim_reads=bool(payload.get("trim_reads", True)),
+                read_steps=read_steps,
                 population_sample=population_by_name.get(sample.name, population_sample),
                 coverage_limit=coverage_limit,
                 accessions=plan_dicts,

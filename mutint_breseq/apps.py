@@ -9,6 +9,8 @@ class BreseqConfig(AppConfig):
         from mutint_common.about_registry import register_about_section
         from mutint_common.import_tab_registry import register_import_tab
         from mutint_common.plugin_registry import register_plugin_urlpatterns
+        from mutint_common.read_step_registry import STAGE_TRANSFORM, register_read_step
+        from mutint_breseq import steps
         from mutint_breseq.version import __version__
 
         register_plugin_urlpatterns([
@@ -28,6 +30,17 @@ class BreseqConfig(AppConfig):
                             requires_reference=True)
         register_about_section(self, name='mutint-breseq', version=__version__,
                                template='about/sections/mutint_breseq.html')
+        # fastp trimming, as a step on the reads through core's registry rather than a block
+        # of the task: one mechanism for this plugin's step and any other component's -- a
+        # FastQC report, say -- each drawn as a checkbox on the launcher. A `transform` step,
+        # so every step that only looks at the reads sees them before fastp rewrites them.
+        register_read_step(self, steps.TRIM, 'Trim reads (fastp)', steps.trim,
+                           stage=STAGE_TRANSFORM, default=True,
+                           available=steps.trim_available,
+                           description=('Adapter trimming only, with quality filtering off. '
+                                        'Files are trimmed as a pair when breseq would read '
+                                        'them as one, and files of long reads are passed to '
+                                        'breseq untrimmed.'))
         # Nothing else is registered, and each absence is a decision:
         #
         # **No rebuilder.** This plugin derives nothing from the mutations -- it *makes* them,

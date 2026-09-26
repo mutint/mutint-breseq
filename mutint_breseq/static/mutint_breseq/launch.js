@@ -120,7 +120,8 @@
         }
         if ((run.read_files || []).length) {
             parts.push("<b>Reads</b> " + esc(run.read_files.join(", ")) +
-                       (run.trim_reads ? " (trimmed with fastp)" : " (untrimmed)"));
+                       ((run.read_steps || []).length
+                            ? " (" + esc(run.read_steps.join(", ")) + ")" : ""));
         }
         if ((run.accessions || []).length) {
             parts.push("<b>From the SRA</b> " + run.accessions.map(function (plan) {
@@ -440,7 +441,12 @@
     argsInput.addEventListener("change", function () {
         if (currentMode() === "read_names") { renderList(); }
     });
-    var trimInput = document.getElementById("breseq-trim-reads");
+    // The ticked read steps, by name: trimming, and whatever other components registered.
+    function checkedReadSteps() {
+        return Array.prototype.map.call(
+            document.querySelectorAll('#breseq-read-steps input[name="read_step"]:checked'),
+            function (input) { return input.value; });
+    }
     // Not `populationInput`, which is the Population *name* box above -- two different
     // meanings of the word, a few lines apart.
     var populationSampleInput = document.getElementById("breseq-population-sample");
@@ -854,7 +860,7 @@
                 time_point: timePointInput.value,
                 sample: sampleInput.value,
                 arguments: argsInput.value,
-                trim_reads: trimInput.checked,
+                read_steps: checkedReadSteps(),
                 population_sample: populationSampleInput.checked,
                 // The number alone: unticked sends blank, which is already how the server
                 // spells "every read". Nothing posts the checkbox itself, so the two can

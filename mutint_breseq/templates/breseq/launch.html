@@ -203,17 +203,28 @@
             </small>
         </div>
 
-        <div class="checkbox" style="margin-bottom: 1em;">
-            <label>
-                <input type="checkbox" id="breseq-trim-reads" checked>
-                Trim reads with fastp first
-            </label>
-            <small class="help-block" style="margin-top: 0;">
-                Adapter trimming only, with fastp's quality filtering off. Files are trimmed
-                as a pair when breseq would read them as one &mdash; two names of the same
-                length that differ only where one has a <code>1</code> and the other a
-                <code>2</code> &mdash; and files of long reads are passed to breseq untrimmed.
-            </small>
+        {% comment %} One checkbox per step registered on a sample's reads -- this plugin's
+           fastp trimming and any installed component's, a FastQC report say -- drawn from
+           `mutint_common.read_step_registry` so the page names none of them. A step whose
+           tool is not installed here is shown disabled with the reason, rather than left off:
+           a missing checkbox says nothing about why. {% endcomment %}
+        <div id="breseq-read-steps" style="margin-bottom: 1em;">
+            {% for step in read_step_choices %}
+            <div class="checkbox" style="margin-bottom: 0.5em;">
+                <label{% if not step.available %} class="text-muted"{% endif %}>
+                    <input type="checkbox" name="read_step" value="{{ step.name }}"
+                           {% if step.checked %}checked{% endif %}
+                           {% if not step.available %}disabled{% endif %}>
+                    {{ step.label }}
+                </label>
+                {% if step.description or not step.available %}
+                <small class="help-block" style="margin-top: 0;">
+                    {{ step.description }}
+                    {% if not step.available %}<em>{{ step.why }}</em>{% endif %}
+                </small>
+                {% endif %}
+            </div>
+            {% endfor %}
         </div>
 
         <div id="breseq-dropzone" style="border: 2px dashed #999; border-radius: 6px;

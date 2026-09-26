@@ -92,8 +92,9 @@ class LaunchTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "breseq-sample-name")
         self.assertContains(response, "breseq-arguments")
-        # Trimming is offered and on by default.
-        self.assertContains(response, 'id="breseq-trim-reads" checked')
+        # Trimming is offered, as a read step, and on by default.
+        self.assertRegex(response.content.decode(),
+                         r'name="read_step" value="trim"\s+checked')
 
     def test_the_form_offers_a_reset_and_the_script_a_per_file_remove(self):
         """The template test reaches the button; launch.js is a static file no template

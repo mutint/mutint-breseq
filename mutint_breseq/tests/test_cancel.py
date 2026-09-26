@@ -154,9 +154,11 @@ class CancelledRunTestCase(TestCase):
 
         self._launch()
         run = BreseqRun.objects.get()
-        # Not cancelled at entry; cancelled at every poll after it. The first poll is the one
+        # Not cancelled at entry, nor when the read steps begin -- `run_read_steps` asks before
+        # each step -- and cancelled at every poll after that. The first of those is the one
         # inside the fastp loop, two seconds in.
-        with mock.patch.object(tasks.jobs, "is_cancelled", side_effect=[False] + [True] * 50):
+        with mock.patch.object(tasks.jobs, "is_cancelled",
+                               side_effect=[False, False] + [True] * 50):
             self.assertIsNone(tasks.run_breseq.call(None, run.pk))
 
         run.refresh_from_db()

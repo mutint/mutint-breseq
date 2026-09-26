@@ -36,7 +36,8 @@ a project's `.gitmodules` is how a component is not installed.
 | `pairing.py` | pure: breseq's rule for which read files are mates, and which files fastp must not touch |
 | `read_names.py` | pure: what a read file's name says the sample is called, and which files are one sample |
 | `mate_check.py` | pure: whether two files that pair by name really are mates, and how to unpair them if not |
-| `tasks.py` | the `@task` — trim, run breseq, check, import, clean up |
+| `tasks.py` | the `@task` — run the read steps, run breseq, check, import, clean up |
+| `steps.py` | this plugin's own read step: fastp trimming, registered through core's `read_step_registry` |
 | `views.py` | the page, the launch endpoint, the preview, the run list; resolves accessions through core |
 | `models.py` | `BreseqRun`, and the receiver that owns its directory |
 | `static/mutint_breseq/launch.js` | the page's behaviour: the input-type menu, the boxes, the drop zone, the run list |
@@ -626,14 +627,15 @@ something to diagnose, a cancellation is not.
 
 Four places poll, and the last two are easy to forget: at task entry (a job cancelled while
 queued is still handed to a worker, because `request_cancel` deliberately never touches the
-queue row), inside the run loop -- which fastp runs through as well as breseq -- in the gap
-between trimming and breseq (a cancel that landed during fastp's last file would otherwise start
-an hours-long breseq), and while waiting for the import lock -- that wait can be half an hour,
+queue row), inside the run loop -- which every read step's tool runs through as well as
+breseq -- before each read step and after the last one (`run_read_steps` does it; a cancel
+that landed during fastp's last file would otherwise start an hours-long breseq), and while
+waiting for the import lock -- that wait can be half an hour,
 and a wait nobody can give up on is the same dead end as a job nobody can stop.
 
 ### The log is the job's, and `BreseqRun.log` is its tail
 
-fastp and breseq both write into one file, opened once for the run:
+Every read step's tool -- FastQC, fastp -- and breseq write into one file, opened once for the run:
 `<store>/components/mutint_jobs/<queue id>/job.log`, read at `/jobs/<pk>/log` **while the run
 is still going**. That is the point -- a twelve-hour run used to print nothing anybody could
 see until it ended, because the output sat in a pipe nobody drained until `communicate()`
@@ -652,6 +654,36 @@ cancellation poll would silently do nothing. The `TaskContext` knows either way.
 invoking the task directly passes `None` and gets neither, which is the honest answer for a
 run that is on no queue.
 
+### The read steps are core's registry, and trimming is one of them
+
+Everything done to the reads before breseq -- fastp trimming, and whatever another component
+registers, such as mutint-fastqc's FastQC report -- is a step in
+`mutint_common.read_step_registry`, and this plugin is a **producer** of it: the launcher draws
+one checkbox per registered step, `launch` checks the ticked names with
+`clean_selection(check_available=True)` before the upload is claimed, the row stores them in
+`read_steps`, and the task hands them to `run_read_steps` after the mate check. Trimming is
+this plugin's own step (`steps.py`, registered in `apps.py`), with nothing special about it:
+one mechanism for this plugin's step and every other component's.
+
+Four things about being the producer:
+
+- **Order is the registry's.** Every `inspect` step, then every `transform` step, so a QC report
+  sees the reads as uploaded and fastp rewrites them last. `read_steps` is stored in that order.
+- **The context carries this run's machinery**: its log, its deadline, its cancellation flag,
+  `_note` for `ctx.note`, `mate_check.uploaded_name` for `ctx.display_name`, and
+  `producer_key()` (`mutint_breseq:<pk>`) for what a step keys its rows by. `scratch_dir`s are
+  under `steps/` in the run directory, which every ending removes.
+- **The sample does not exist while the steps run**, so after the import the task calls
+  `attach_read_steps(..., sample)`, and `_fail` and `_cancelled` call `discard_read_steps`.
+- **`read_steps` left out of a launch** means what the page would have ticked: each step on by
+  default that can run here. Named explicitly, a step that cannot run is a 400 beside the
+  checkboxes rather than silently dropped. A stored name whose component has since been
+  uninstalled is dropped at run time -- there is nothing left that could run it.
+
+A step raising `ReadStepFailed` fails the run -- trimming does, when fastp is missing or exits
+nonzero; `Cancelled`, `TimeoutExpired` and `OSError` from any step are mapped exactly as
+breseq's own are.
+
 ### Trimming is breseq's pairing rule, or it is wrong
 
 fastp trims a pair in paired-end mode, so the plugin has to decide which files are mates
@@ -659,7 +691,7 @@ fastp trims a pair in paired-end mode, so the plugin has to decide which files a
 trimmed files whose mates it never saw together. `pairing.read_file_sets` is therefore
 `cReadFileSets::Init` from breseq's `settings.cpp` transcribed, not a regex on `_R1`: same-length
 base names differing at exactly one `1`/`2`, duplicates renamed first, ambiguity meaning
-unpaired. `test_pairing.py` holds the cases. The trimmed files keep their names in `trimmed/`,
+unpaired. `test_pairing.py` holds the cases. The trimmed files keep their names in `steps/trim/`,
 which is what makes breseq pair them identically and what keeps a `.gz` a `.gz` (fastp decides
 compression from the output name).
 
@@ -738,7 +770,7 @@ under it** — it cannot know what a component keeps. The `post_delete` receiver
 is the whole lifecycle, and because `BreseqRun.experiment` cascades, that receiver is also what
 makes deleting an *experiment* reach the reads and the report.
 
-Every ending deletes `reads/`, `trimmed/` and the output directory -- success through
+Every ending deletes `reads/`, `steps/` and the output directory -- success through
 `cleanup_after_import`, failure and cancellation through `_discard_files`. A failure used to
 keep everything, on the reasoning that a failed run is exactly when the reads matter; what
 that kept in practice was gigabytes per failed run that nobody opened, because the log -- on
@@ -786,7 +818,7 @@ cd mutint && ./mutint test mutint_breseq
 
 There is no way to run them from mutint-core: the plugin is not installed there.
 
-**228 tests**, and the end-to-end ones are affordable because of two things. The test runner
+**236 tests**, and the end-to-end ones are affordable because of two things. The test runner
 forces `django.tasks` to its immediate backend, so `.enqueue()` runs inline and one POST
 exercises launch, the subprocess, the ingest and the cleanup. And `tests/fake_breseq.py` is a
 **real executable on disk** rather than a `subprocess.run` patch — the two things most likely
