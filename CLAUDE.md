@@ -64,8 +64,10 @@ breseq is therefore not enough: without `env/tools/bin` on `PATH` it stops with
 `Required executable "bowtie2" not found` — and it does so with **returncode 0**, so a
 returncode check alone calls that run a success and hands the importer an empty directory.
 
-`runner.tool_environment()` is what builds that PATH, and `runner.check_output()` is the second
-half of the answer: what the run *produced* decides, not what it exited with. Both have tests.
+Core's `mutint_common.tools.tool_environment()` is what builds that PATH -- every tool this
+plugin runs, breseq and fastp alike, runs under it -- and `runner.check_output()` is the second
+half of the answer: what the run *produced* decides, not what it exited with. Both have tests:
+the fake breseq records the PATH it was started with.
 This was found by running it.
 
 ### The channel lives in `tools.txt`, not in the entry script
@@ -818,7 +820,7 @@ cd mutint && ./mutint test mutint_breseq
 
 There is no way to run them from mutint-core: the plugin is not installed there.
 
-**236 tests**, and the end-to-end ones are affordable because of two things. The test runner
+**234 tests**, and the end-to-end ones are affordable because of two things. The test runner
 forces `django.tasks` to its immediate backend, so `.enqueue()` runs inline and one POST
 exercises launch, the subprocess, the ingest and the cleanup. And `tests/fake_breseq.py` is a
 **real executable on disk** rather than a `subprocess.run` patch — the two things most likely

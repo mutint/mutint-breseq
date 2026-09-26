@@ -264,28 +264,6 @@ def default_processors():
     return max(1, count - 2) if count else None
 
 
-def tool_environment(env=None):
-    """`os.environ` with the managed tools ahead of it on PATH.
-
-    **breseq shells out to its own toolchain by bare name** -- bowtie2, samtools, gnuplot --
-    so an absolute path to breseq is not enough on its own. Without this it stops with
-    `Required executable "bowtie2" not found`, and it does so **exiting 0**, so a returncode
-    check alone would call that run a success and hand the importer an empty directory.
-
-    Falls back to the environment unchanged when nothing is managed, which is the developer
-    who installed breseq themselves -- `tool_path` already prefers `env/tools/bin` over PATH,
-    so the two agree about which breseq is being run.
-    """
-    env = dict(os.environ if env is None else env)
-    directory = tools.tools_dir()
-    if not directory:
-        return env
-    bin_dir = os.path.join(directory, "bin")
-    existing = env.get("PATH", "")
-    env["PATH"] = bin_dir + (os.pathsep + existing if existing else "")
-    return env
-
-
 def breseq_path():
     """Absolute path to breseq, or ToolMissing naming what installs it."""
     return tools.require(BRESEQ)

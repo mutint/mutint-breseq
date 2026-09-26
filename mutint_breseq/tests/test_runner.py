@@ -10,7 +10,7 @@ import shutil
 import tempfile
 from unittest import mock
 
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.test import SimpleTestCase, TestCase
 
 from mutint_breseq import pairing, runner
 
@@ -233,20 +233,6 @@ class FastpArgvTestCase(SimpleTestCase):
             self.assertEqual(16, runner.fastp_threads())
         with mock.patch.object(runner, "default_processors", return_value=None):
             self.assertIsNone(runner.fastp_threads())
-
-
-class ToolEnvironmentTestCase(TestCase):
-    def test_the_tools_bin_leads_the_path(self):
-        # breseq shells out to bowtie2, samtools and gnuplot by bare name and exits 0 when it
-        # cannot find them, so this is what stands between a run and a silent no-op.
-        with override_settings(MUTINT_TOOLS_DIR="/managed/tools"):
-            env = runner.tool_environment({"PATH": "/usr/bin"})
-        self.assertEqual(env["PATH"], os.path.join("/managed/tools", "bin") + os.pathsep + "/usr/bin")
-
-    def test_an_unmanaged_environment_is_left_alone(self):
-        with override_settings(MUTINT_TOOLS_DIR=None):
-            env = runner.tool_environment({"PATH": "/usr/bin"})
-        self.assertEqual(env["PATH"], "/usr/bin")
 
 
 class CheckOutputTestCase(SimpleTestCase):

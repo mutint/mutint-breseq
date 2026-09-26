@@ -27,7 +27,7 @@ from django.conf import settings
 from django.tasks import task
 from django.utils import timezone
 
-from mutint_common import store
+from mutint_common import store, tools
 from mutint_common.read_step_registry import (
     ReadStepContext,
     ReadStepFailed,
@@ -366,7 +366,7 @@ def run_breseq(context, run_id):
                                  coverage_limit=run.coverage_limit)
         try:
             returncode = processes.run_tool(
-                argv, log, env=runner.tool_environment(),
+                argv, log, env=tools.tool_environment(),
                 timeout=DRY_RUN_TIMEOUT_SECONDS,
                 is_cancelled=lambda: jobs.is_cancelled(queue_id), what="breseq --dry-run")
         except processes.Cancelled:
@@ -446,7 +446,7 @@ def run_breseq(context, run_id):
 
         try:
             returncode = processes.run_tool(
-                argv, log, env=runner.tool_environment(),
+                argv, log, env=tools.tool_environment(),
                 timeout=max(1, deadline - time.monotonic()),
                 is_cancelled=lambda: jobs.is_cancelled(queue_id), what="breseq")
         except processes.Cancelled:

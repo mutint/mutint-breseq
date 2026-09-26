@@ -13,6 +13,7 @@ import logging
 import os
 
 from mutint_common.read_step_registry import ReadStepFailed
+from mutint_common import tools
 from mutint_common.tools import ToolMissing, tool_path
 
 from mutint_breseq import runner
@@ -51,7 +52,7 @@ def trim(ctx):
         raise ReadStepFailed(str(missing))
 
     out_dir = ctx.scratch_dir(TRIM)
-    env = runner.tool_environment()
+    env = tools.tool_environment()
     replacement = {}
     for plan in runner.plan_trimming(ctx.reads, paired=ctx.paired):
         names = ", ".join(os.path.basename(path) for path in plan.read_set.files)

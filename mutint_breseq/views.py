@@ -21,7 +21,7 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST
 
 import mutint_sample.views.common
-from mutint_common import preferences, read_step_registry, store
+from mutint_common import preferences, read_step_registry, store, tools
 from mutint_common.fileserve import serve_file
 from mutint_common.util import get_user_context
 from mutint_experiment.models import Experiment
@@ -456,7 +456,7 @@ def _preflight(experiment, arguments, polymorphism=False, coverage_limit=None):
         try:
             with open(log_path, "wb") as log:
                 returncode = processes.run_tool(
-                    argv, log, env=runner.tool_environment(),
+                    argv, log, env=tools.tool_environment(),
                     timeout=PREFLIGHT_TIMEOUT_SECONDS, what="breseq --dry-run")
         except subprocess.TimeoutExpired:
             return ("breseq did not answer within %d seconds when asked to check these "
