@@ -89,6 +89,12 @@ class BreseqRun(models.Model):
     # one; whole numbers are the realistic case and `runner.format_coverage_limit` is what
     # keeps `80` from reaching the command line as `80.0`.
     coverage_limit = models.FloatField(null=True, blank=True)
+    # What a `metadata.csv` row said about the sample beyond where it sits -- its treatment,
+    # description and flags, as `mutint_import.metadata.details_of` shapes them -- applied to
+    # the sample once the import has made it, through core's `apply_sample_details`. Carried
+    # on the row because the CSV is read at launch and the sample exists hours later; empty
+    # for a launch with no CSV, or a row that said nothing beyond the coordinate.
+    sample_details = models.JSONField(default=dict)
     # The basenames dropped, so the run list can say what it was given after the reads are
     # deleted. Not paths: nothing resolves these, they are for a person to read.
     read_files = models.JSONField(default=list)

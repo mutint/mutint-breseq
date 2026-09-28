@@ -585,7 +585,19 @@
                   "</td>"
                 : '<td colspan="2"><small style="color: #8a6d3b;">no population or time ' +
                   "point in the name &mdash; filed under Unspecified</small></td>";
-            return "<tr><td><b>" + esc(sample.name) + "</b></td>" + placed +
+            // What a metadata.csv row said beyond the coordinate -- the treatment, the
+            // description, the flags -- named under the sample so the table promises what
+            // the sample will carry and not only what it will be called.
+            var details = sample.details || {};
+            var said = [];
+            if (details.treatment) { said.push("treatment " + esc(details.treatment)); }
+            if (details.description) { said.push("description " + esc(details.description)); }
+            Object.keys(details.flags || {}).forEach(function (field) {
+                said.push(esc(field.replace(/^is_/, "")) + (details.flags[field] ? "" : ": no"));
+            });
+            var detailNote = said.length
+                ? '<br><small style="color: #666;">' + said.join("; ") + "</small>" : "";
+            return "<tr><td><b>" + esc(sample.name) + "</b>" + detailNote + "</td>" + placed +
                    '<td><small style="color: #666;">' + esc(sample.files.join(", ")) +
                    accessionNote(sample) + "</small></td><td>" +
                    (sample.replaces

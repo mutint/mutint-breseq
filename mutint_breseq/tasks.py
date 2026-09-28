@@ -513,6 +513,7 @@ def run_breseq(context, run_id):
     sample = _imported_sample(experiment, run.sample_name)
     if run.population_sample:
         _mark_population_sample(sample)
+    _apply_sample_details(sample, run.sample_details)
     _record_read_sources(sample, reads, paired, downloaded)
     # The sample exists now, so whatever a read step kept about these reads can say which
     # sample it belongs to.
@@ -557,6 +558,26 @@ def _mark_population_sample(sample):
         return
     sample.is_clonal = False
     sample.save(update_fields=["is_clonal"])
+
+
+def _apply_sample_details(sample, details):
+    """Set the treatment, description and flags a `metadata.csv` row gave this run's sample.
+
+    The row was read at launch and the sample exists only now, so the details rode on the
+    run (`BreseqRun.sample_details`) and are applied here through core's own rule --
+    `gd_import.apply_sample_details`, the function the Import data page's CSV goes through
+    -- so a treatment given on this page and one given on that one land identically. Like
+    `_mark_population_sample`, this reaches a sample the experiment already held: a re-run
+    that carries a CSV updates what the CSV says.
+
+    `sample` may be None, for the reason `_imported_sample` gives, and an empty `details` is a
+    launch with no CSV; both are nothing to do.
+    """
+    if sample is None or not details:
+        return
+    from mutint_import.gd_import import apply_sample_details
+
+    apply_sample_details(sample, details)
 
 
 def _record_read_sources(sample, reads, paired, downloaded=None):

@@ -303,6 +303,8 @@ def _run_rows(experiment):
             # step whose component has since been uninstalled is shown by its stored name.
             "read_steps": _step_labels(run.read_steps),
             "population_sample": run.population_sample,
+            # What the metadata.csv row said the sample should carry, applied after import.
+            "sample_details": run.sample_details or {},
             "coverage_limit": run.coverage_limit,
             "status": run.status,
             "queue_status": _queue_status(run),
@@ -628,8 +630,11 @@ def launch(request):
     # sample's reads; in read-names mode each accession is a sample of its own beside the
     # samples the dropped names derive, named by ENA's alias or by the accession.
     # Per-sample Population sample flags a metadata.csv row set; the form's checkbox is the
-    # default for every run the file did not speak about.
+    # default for every run the file did not speak about. What else the row said -- the
+    # treatment, description and flags -- rides on the run for the task to apply once the
+    # sample exists; see `BreseqRun.sample_details`.
     population_by_name = {}
+    details_by_name = {}
     if mode == MODE_READ_NAMES:
         paired = "--no-paired-mapping" not in runner.split_arguments(arguments)
         plan = []
@@ -639,7 +644,7 @@ def launch(request):
         except metadata.MetadataError as refusal:
             abandon()
             return JsonResponse({"error": str(refusal), "field": "metadata"}, status=400)
-        for sample, _named_by, problem, is_clonal in named:
+        for sample, _named_by, problem, row in named:
             if problem:
                 abandon()
                 return JsonResponse({"error": problem, "field": "metadata"}, status=400)
@@ -651,9 +656,11 @@ def launch(request):
                     {"error": "%s could not be a sample name: %s" % (sample.name, refusal),
                      "field": "upload"}, status=400)
             plan.append((sample, []))
-            if is_clonal is not None:
-                # The row's word for this sample outranks the form's one checkbox.
-                population_by_name[sample.name] = not is_clonal
+            if row is not None:
+                if row.is_clonal is not None:
+                    # The row's word for this sample outranks the form's one checkbox.
+                    population_by_name[sample.name] = not row.is_clonal
+                details_by_name[sample.name] = metadata.details_of(row)
         plan.extend(_accession_samples(plans))
         clash = _name_clash(plan)
         if clash:
@@ -680,6 +687,7 @@ def launch(request):
                 arguments=arguments,
                 read_steps=read_steps,
                 population_sample=population_by_name.get(sample.name, population_sample),
+                sample_details=details_by_name.get(sample.name, {}),
                 coverage_limit=coverage_limit,
                 accessions=plan_dicts,
                 status=STATUS_QUEUED)
@@ -808,14 +816,18 @@ def preview(request):
 
     existing = _existing_samples(experiment)
     rows = []
-    for sample, named_by, problem, is_clonal in named:
+    for sample, named_by, problem, metadata_row in named:
         row = _preview_row(existing, sample)
         if named_by:
             row["named_by"] = named_by
         if problem:
             row["error"] = problem
-        if is_clonal is not None:
-            row["population_sample"] = not is_clonal
+        if metadata_row is not None:
+            if metadata_row.is_clonal is not None:
+                row["population_sample"] = not metadata_row.is_clonal
+            # The rest of what the row said, so the preview promises what the sample will
+            # carry rather than only what it will be called.
+            row["details"] = metadata.details_of(metadata_row)
         rows.append(row)
     for sample, plan_dicts in _accession_samples(plans):
         row = _preview_row(existing, sample)
@@ -835,15 +847,17 @@ def _metadata(payload):
 def _apply_metadata(samples, placement):
     """Rename the derived samples a metadata.csv row covers.
 
-    Returns `[(sample, named_by, problem, is_clonal)]` in the derivation's order; `is_clonal`
-    is the row's `sample_type` (True for a clone, False for a population, None unsaid),
-    which sets that run's own Population sample flag over the form's checkbox. A row matches a
-    sample when it names any of its files, exactly or as a stem the file starts with or
-    contains; the name becomes `compose_sample_name` of the row, so the importer reads the
-    coordinate back out of it exactly as it would from a dropped folder. A row that composes
-    to nothing usable is a `problem` on that sample rather than a refusal of the drop, so the
-    preview can show it beside the rest. Accession samples are not renamed: their files are
-    ENA's names, and a row naming a run is a later feature.
+    Returns `[(sample, named_by, problem, row)]` in the derivation's order; `row` is the
+    `metadata.Row` that named the sample, or None. Its `is_clonal` (the `sample_type` cell:
+    True for a clone, False for a population, None unsaid) sets that run's own Population
+    sample flag over the form's checkbox, and `metadata.details_of(row)` -- the treatment,
+    description and flags -- is stored on the run for the task to apply once the sample
+    exists. A row matches a sample when it names any of its files, exactly or as a stem the
+    file starts with or contains; the name becomes `compose_sample_name` of the row, so the
+    importer reads the coordinate back out of it exactly as it would from a dropped folder.
+    A row that composes to nothing usable is a `problem` on that sample rather than a refusal
+    of the drop, so the preview can show it beside the rest. Accession samples are not
+    renamed: their files are ENA's names, and a row naming a run is a later feature.
     """
     named = []
     for sample in samples:
@@ -858,10 +872,9 @@ def _apply_metadata(samples, placement):
             name = sample_names.compose_sample_name(row.population, row.time_point, row.sample)
         except sample_names.SampleNameError as refusal:
             named.append((sample, "metadata",
-                          "metadata.csv line %d: %s" % (row.line, refusal), row.is_clonal))
+                          "metadata.csv line %d: %s" % (row.line, refusal), row))
             continue
-        named.append((read_names.DerivedSample(name, sample.files), "metadata", None,
-                      row.is_clonal))
+        named.append((read_names.DerivedSample(name, sample.files), "metadata", None, row))
     return named
 
 

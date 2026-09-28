@@ -852,6 +852,44 @@ class RunTestCase(TestCase):
         body = self._preview(["s1_R1.fastq", "s1_R2.fastq"], metadata=typed)
         self.assertTrue(body["samples"][0]["population_sample"])
 
+    def test_the_csvs_treatment_description_and_flags_reach_the_sample(self):
+        """The name and the sample type reached the sample and the rest of the row did not,
+        because the sample exists hours after the CSV was read. The row rides on the run now
+        and is applied after the import, through core's own rule -- so a re-run carrying a
+        CSV updates a sample the experiment already held, as the population flag does."""
+        described = ("sample,population,time_point,treatment,description,hypermutator,data\n"
+                     "763A,Ara-2,500,glucose,clone A,yes,s1\n"
+                     "clone7,,,,,,other\n")
+        response = self._launch(input_mode="read_names",
+                                names=("s1_R1.fastq", "s1_R2.fastq", "other_R1.fastq",
+                                       "other_R2.fastq"),
+                                metadata=described)
+        self.assertEqual(response.status_code, 200, response.content)
+        run = BreseqRun.objects.get(sample_name="Ara-2_500_763A")
+        self.assertEqual({"treatment": "glucose", "description": "clone A",
+                          "flags": {"is_hypermutator": True}}, run.sample_details)
+        placed = Sample.objects.get(source_name="Ara-2_500_763A")
+        self.assertEqual(("glucose", "clone A", True),
+                         (placed.treatment, placed.description, placed.is_hypermutator))
+        # A row whose cells were blank said nothing beyond the coordinate.
+        other = BreseqRun.objects.get(sample_name="clone7")
+        self.assertEqual({"treatment": "", "description": ""}, other.sample_details)
+        self.assertFalse(Sample.objects.get(source_name="clone7").treatment)
+
+        # Re-running with a different word updates the same sample; a blank leaves it.
+        again = ("sample,population,time_point,treatment,data\n"
+                 "763A,Ara-2,500,lactose,s1\n")
+        self._launch(input_mode="read_names", names=("s1_R1.fastq", "s1_R2.fastq"),
+                     metadata=again)
+        placed.refresh_from_db()
+        self.assertEqual(("lactose", "clone A", True),
+                         (placed.treatment, placed.description, placed.is_hypermutator))
+        self.assertEqual(1, Sample.objects.filter(source_name="Ara-2_500_763A").count())
+
+        body = self._preview(["s1_R1.fastq", "s1_R2.fastq"], metadata=described)
+        self.assertEqual({"treatment": "glucose", "description": "clone A",
+                          "flags": {"is_hypermutator": True}}, body["samples"][0]["details"])
+
     def test_the_preview_honours_the_metadata_and_says_so(self):
         body = self._preview(["s1_R1.fastq", "s1_R2.fastq", "lonely_R1.fastq"],
                              metadata=self.METADATA)

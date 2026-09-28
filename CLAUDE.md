@@ -165,8 +165,16 @@ derivation first and then asks `Metadata.lookup_stem` over each derived sample's
 cell may be a stem the mates share; a hit composes the row's coordinate into the name, and
 the importer reads it back out exactly as from a dropped folder; a row's `sample_type` sets
 that run's `population_sample` over the form's checkbox, so one launch can mix clones and
-populations. Accession samples are not
-renamed. A row whose coordinate cannot be composed is a problem on that sample in the
+populations. **The rest of the row reaches the sample too**: its treatment, description and
+flags are stored on the run as `sample_details` (`metadata.details_of` shapes them) and
+applied after the import by `tasks._apply_sample_details`, through core's
+`gd_import.apply_sample_details` -- the function the Import data page's CSV goes through --
+so a treatment given here and one given there land identically. Carried on the row because
+the CSV is read at launch and the sample exists hours later. Like the population flag, it
+reaches a sample the experiment already held, so a re-run carrying a CSV updates what the
+CSV says; a blank cell leaves the field, as on import. The preview names what a row said
+under the sample. (For a long time only the name and the type got through, silently.)
+Accession samples are not renamed. A row whose coordinate cannot be composed is a problem on that sample in the
 preview and a 400 at launch; two rows naming one file is a conflict from core's reader.
 
 **A blank Population and Time point is the unplaced case**, and the page says so: the sample
@@ -820,7 +828,7 @@ cd mutint && ./mutint test mutint_breseq
 
 There is no way to run them from mutint-core: the plugin is not installed there.
 
-**234 tests**, and the end-to-end ones are affordable because of two things. The test runner
+**235 tests**, and the end-to-end ones are affordable because of two things. The test runner
 forces `django.tasks` to its immediate backend, so `.enqueue()` runs inline and one POST
 exercises launch, the subprocess, the ingest and the cleanup. And `tests/fake_breseq.py` is a
 **real executable on disk** rather than a `subprocess.run` patch — the two things most likely
