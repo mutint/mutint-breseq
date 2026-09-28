@@ -156,7 +156,7 @@ about clonality — a drop that mixes clones and populations is two launches.
 Drop a `metadata.csv` among the read files under **Multiple samples** and it names and
 places the samples instead of their filenames. It is the same file the Import data page
 takes (see *Loading data* there for the columns and the blank and worked-example templates,
-which the form links to): one row per sample, with `sample`, `population`, `time_point`, and
+which the form links to): one row per sample, with `sample_id`, `population`, `time_point`, and
 a `data` cell naming the read files -- exactly, or by a stem the files share, so `s1` covers
 `s1_R1.fastq.gz` and `s1_R2.fastq.gz`. A `sample_type` of `population` or `clone` sets that
 sample's **Population sample** option over the checkbox's. The preview under the drop zone shows what each row
@@ -169,7 +169,7 @@ file is listed and not used.
 Under Single sample and for a derived name alike, the same two shapes place a sample on its population and time
 point automatically:
 
-| name | population | time point | sample |
+| name | population | time point | sample ID |
 |---|---|---|---|
 | `3-30000-1-1` | 3 | 30000 | 1-1 |
 | `Ara-2_500gen_763A` | Ara-2 | 500 | 763A |

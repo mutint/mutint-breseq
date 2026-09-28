@@ -586,12 +586,12 @@
                 : '<td colspan="2"><small style="color: #8a6d3b;">no population or time ' +
                   "point in the name &mdash; filed under Unspecified</small></td>";
             // What a metadata.csv row said beyond the coordinate -- the treatment, the
-            // description, the flags -- named under the sample so the table promises what
+            // label, the flags -- named under the sample so the table promises what
             // the sample will carry and not only what it will be called.
             var details = sample.details || {};
             var said = [];
             if (details.treatment) { said.push("treatment " + esc(details.treatment)); }
-            if (details.description) { said.push("description " + esc(details.description)); }
+            if (details.description) { said.push("label " + esc(details.description)); }
             Object.keys(details.flags || {}).forEach(function (field) {
                 said.push(esc(field.replace(/^is_/, "")) + (details.flags[field] ? "" : ": no"));
             });
