@@ -13,9 +13,7 @@
 
 {% block title %}Run breseq — {{ experiment.name }}{% endblock %}
 
-{% block header %}
-    <b>{{ experiment.name }}</b> &mdash; Import data
-{% endblock %}
+{% block header %}{% include "experiment_header.html" with project_id=experiment.project_id project_name=experiment.project.name name=experiment.name page="Run breseq" %}{% endblock %}
 
 {% block content %}
 {% comment %} This page is the Run breseq tab of the Import data page, so it wears the same
@@ -41,7 +39,7 @@
 {% else %}
     <p>Drop this sample's FASTQ read files below, or name them by SRA accession, or both.
        Dropped files are uploaded and accessions are fetched from ENA's mirror of the archive;
-       then breseq runs against <b>{{ experiment.name }}</b>'s reference genome and its output
+       then breseq runs against <b class="mutint-experiment-name">{{ experiment.name }}</b>'s reference genome and its output
        is imported as one sample.</p>
 
     <form id="breseq-form">
