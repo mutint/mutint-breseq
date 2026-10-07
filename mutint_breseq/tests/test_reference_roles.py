@@ -178,3 +178,41 @@ class ReferenceArgumentsTestCase(_Experiment):
         self.assertEqual(
             runner.reference_arguments(bare, os.path.join(self.scratch, "r"), self.stored),
             [("-r", self.stored)])
+
+
+class TopologyReachesBreseqTestCase(_Experiment):
+    """A topology set on the Reference page is in every file breseq is handed.
+
+    Core keeps it in the stored GFF3's `region` rows, and the per-role files are rendered
+    from the same model, so nothing here has to carry it -- which is exactly what to
+    assert, because a rendering path that dropped the row would silently hand breseq a
+    linear chromosome.
+    """
+
+    def test_a_circular_contig_is_circular_in_its_role_file(self):
+        from mutint_import import reference_topology
+        from mutint_import.reference import gff3_topologies
+
+        reference_topology.set_topology(self._refresh(), {"test_ref": True})
+        set_roles(self._refresh(), {"IS150": ROLE_JUNCTION_ONLY})
+        references = runner.reference_arguments(
+            self._refresh(), os.path.join(self.scratch, "reference"), self.stored)
+
+        by_flag = {}
+        for flag, path in references:
+            with open(path, encoding="utf-8") as handle:
+                by_flag[flag] = gff3_topologies(handle.read())
+        self.assertEqual(by_flag["-r"], {"test_ref": True})
+        self.assertEqual(by_flag["-s"], {})
+
+    def test_a_uniform_reference_hands_breseq_the_rewritten_stored_file(self):
+        from mutint_import import reference_topology
+        from mutint_import.reference import gff3_topologies
+
+        reference_topology.set_topology(self._refresh(), {"test_ref": True})
+        set_roles(self._refresh(), {"NODE_1": ROLE_REFERENCE})  # make it uniform
+        references = runner.reference_arguments(
+            self._refresh(), os.path.join(self.scratch, "reference"), self.stored)
+        self.assertEqual(references, [("-r", self.stored)])
+        with open(self.stored, encoding="utf-8") as handle:
+            self.assertEqual(gff3_topologies(handle.read()), {"test_ref": True})
