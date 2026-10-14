@@ -10,7 +10,13 @@ class BreseqConfig(AppConfig):
         from mutint_common.import_tab_registry import register_import_tab
         from mutint_common.plugin_registry import register_plugin_urlpatterns
         from mutint_common.read_step_registry import STAGE_TRANSFORM, register_read_step
-        from mutint_breseq import steps
+        from mutint_common.curate_tab_registry import register_curate_tab
+        from mutint_common.plugin_registry import (
+            register_sample_import_hook, register_sequence_rename_hook,
+        )
+        from mutint_common.sample_link_registry import register_sample_link
+        from mutint_common.storage_registry import register_storage_kind
+        from mutint_breseq import evidence, steps, storage, views
         from mutint_breseq.version import __version__
 
         register_plugin_urlpatterns([
@@ -41,6 +47,29 @@ class BreseqConfig(AppConfig):
                                         'Files are trimmed as a pair when breseq would read '
                                         'them as one, and files of long reads are passed to '
                                         'breseq untrimmed.'))
+        # The evidence breseq could not assign to a mutation, kept per sample from the same
+        # parse core imports the mutations from, and the Curate tab that lists and resolves
+        # it. The tab goes in Curate's own strip rather than the sidebar because resolving
+        # evidence *is* curating: add the mutation it points at, or say why not.
+        register_sample_import_hook(evidence.replace_from_import)
+        register_curate_tab('evidence', 'Evidence', url_name='breseq_evidence')
+        # A rename replaces the contig names core's rows carry; the evidence rows carry the
+        # same names, on both sides of a junction.
+        register_sequence_rename_hook(evidence.rename_contigs)
+        # The reads a run was analysed from, kept under the sample so a curation check can
+        # analyse them again -- gigabytes per sample, which is why they are a kind somebody
+        # can clear. See `storage.py` for why they live under the sample and not the run.
+        register_storage_kind(self, key=storage.KIND, label='Kept read files',
+                              measure=storage.measure_reads, clear=storage.clear_reads,
+                              description=('The read files each sample was analysed from, '
+                                           'kept so a curation check can re-run breseq on '
+                                           'them. Clearing them means the next check fetches '
+                                           'the reads again by SRA accession, or asks for '
+                                           'the files to be dropped.'))
+        # **Check curation** on a sample's page, for an editor of an experiment with a
+        # reference: the launcher for a check of that sample.
+        register_sample_link(self, 'check', views.check_sample_links)
+
         # Nothing else is registered, and each absence is a decision:
         #
         # **No rebuilder.** This plugin derives nothing from the mutations -- it *makes* them,
@@ -51,10 +80,10 @@ class BreseqConfig(AppConfig):
         # **No export handler.** It adds no mutation type; what it produces is ordinary
         # samples, exported by core's `mut` like any other.
         #
-        # **No storage kind.** A run directory holds reads and breseq's output only while the
-        # run is going: every ending -- imported, failed, cancelled -- deletes them, so there
-        # is nothing of this plugin's on disk for `storage_registry` to count. It registered
-        # one for failed runs for a commit, until failed runs stopped keeping their files.
+        # **One storage kind, and it is the sample's, not the run's.** A run directory holds
+        # reads and breseq's output only while the run is going: every ending deletes them.
+        # What a successful run *keeps* -- its untrimmed reads, for a later check -- goes
+        # under the sample, which is the kind registered above.
         #
         # **No import handler**, which is the one worth explaining because it looks like the
         # obvious way to build this. A FASTQ drop needs a sample name and a command line, and

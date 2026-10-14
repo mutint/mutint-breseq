@@ -69,6 +69,22 @@ DIVERGENCE_DEFAULTS = (("--max-evidence-items", "5000"), ("--max-percent-diverge
 # box and a path nothing wrote, and does not pretend to be more.
 DRY_RUN_FLAG = "--dry-run"
 
+# A curation check: breseq applies the mutations in this GenomeDiff to the reference before
+# aligning the reads, and every entry of its output carries `original_*` coordinates --
+# the same position in the unmutated reference. Long spelling only; breseq has no short one.
+# Arrived in breseq-prerelease g25617bb8, the second floor `tools.txt` records: an older
+# breseq refuses it at the check's preflight, by name, and ordinary runs never pass it.
+APPLY_CHECK_FLAG = "--apply-check"
+
+# What a check must have written beside `REQUIRED_OUTPUT`: the block map from the mutated
+# reference back to the original. It is what proves the apply happened, and the one file
+# that distinguishes a check's output from an analysis's.
+ORIGINAL_COORDINATES = os.path.join("data", "original_coordinates.tsv")
+
+# breseq's HTML report, which a check stores under the sample as its second report. The
+# importer reads the same directory for an analysis.
+REPORT_RELATIVE_PATH = "output"
+
 # What `mutint_import.breseq_folder` requires of a sample directory, and therefore what a run
 # must have produced before it is worth calling the importer. breseq 0.50 writes all five
 # itself, which is why nothing here reshapes anything -- but the check is still made, because
@@ -112,7 +128,7 @@ def format_coverage_limit(value):
 
 
 def build_argv(breseq, output_dir, references, arguments, reads, processors=None,
-               dry_run=False, polymorphism=False, coverage_limit=None):
+               dry_run=False, polymorphism=False, coverage_limit=None, apply_check=None):
     """The command line for one run.
 
     `references` is an ordered sequence of `(flag, path)` pairs -- breseq takes reference
@@ -148,6 +164,10 @@ def build_argv(breseq, output_dir, references, arguments, reads, processors=None
     the check happens before trimming, so it names the untrimmed reads, and at launch it names
     a throwaway one because the upload has not been claimed yet. What it is checking is the
     option string, which is identical in all three.
+
+    `apply_check` is the curated GenomeDiff a *check* applies first, and is the one injected
+    option with no "box wins" rule: an input-file option given twice is a real ambiguity,
+    so the launchers refuse the flag typed into the box rather than letting either copy win.
     """
     typed = split_arguments(arguments)
 
@@ -166,6 +186,8 @@ def build_argv(breseq, output_dir, references, arguments, reads, processors=None
     for flag, value in DIVERGENCE_DEFAULTS:
         if flag not in typed:
             argv += [flag, value]
+    if apply_check:
+        argv += [APPLY_CHECK_FLAG, apply_check]
     argv += ["-o", output_dir]
     for flag, path in references:
         argv += [flag, path]
@@ -329,18 +351,63 @@ def plan_trimming(reads, paired=True):
     return plans
 
 
-def check_output(output_dir):
+def check_output(output_dir, check=False):
     """Raise BreseqUnusable unless `output_dir` is something the importer can read.
 
     Checked rather than assumed because the two failures look identical from outside: breseq
     that stopped early leaves a directory the importer describes as *"has no
     data/output.gd"*, which reads as the plugin having looked in the wrong place. Naming the
     missing file here puts the blame where it belongs, next to breseq's own log.
+
+    A *check* must also have written the coordinate map, which is what says the curated
+    mutations were applied at all.
     """
-    for relative in REQUIRED_OUTPUT:
+    required = REQUIRED_OUTPUT + ((ORIGINAL_COORDINATES,) if check else ())
+    for relative in required:
         if not os.path.isfile(os.path.join(output_dir, relative)):
             raise BreseqUnusable(
                 "breseq produced no %s. Its output is below." % relative)
+
+
+def keep_reads(reads_dir, destination):
+    """Move a run's read files under the sample, replacing what was there. The names moved.
+
+    The **untrimmed** reads, after the mate check has renamed anything it took apart --
+    what breseq was handed before any step rewrote it -- so a later check re-runs the read
+    steps on the same input rather than trimming a trimmed file. A move rather than a copy:
+    the run's directory is about to be emptied, and within one store it is a rename.
+    """
+    if not os.path.isdir(reads_dir):
+        return []
+    shutil.rmtree(destination, ignore_errors=True)
+    os.makedirs(destination, exist_ok=True)
+    names = sorted(name for name in os.listdir(reads_dir)
+                   if os.path.isfile(os.path.join(reads_dir, name)))
+    for name in names:
+        shutil.move(os.path.join(reads_dir, name), os.path.join(destination, name))
+    return names
+
+
+def link_reads(source_dir, reads_dir):
+    """Put a sample's kept reads into a check run's `reads/` as hard links. The names.
+
+    Links rather than the files themselves, because everything downstream treats `reads/`
+    as the run's own: `_split_mismatched_pairs` renames in it and every ending rmtrees it,
+    and neither may touch the sample's copy. A hard link is a second directory entry for the
+    same bytes, so a rename or an unlink in the run's directory leaves the sample's alone.
+    Copied where the filesystem will not link (another device, say).
+    """
+    os.makedirs(reads_dir, exist_ok=True)
+    names = sorted(name for name in os.listdir(source_dir)
+                   if os.path.isfile(os.path.join(source_dir, name)))
+    for name in names:
+        source = os.path.join(source_dir, name)
+        target = os.path.join(reads_dir, name)
+        try:
+            os.link(source, target)
+        except OSError:
+            shutil.copy2(source, target)
+    return names
 
 
 def cleanup_after_import(run_dir, output_dir):

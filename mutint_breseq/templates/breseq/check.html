@@ -1,0 +1,110 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}{{ title }}{% endblock %}
+{% block scripts_and_style %}
+    <script src="{% static "vendor/sweetalert-2.1.2/sweetalert.min.js" %}"></script>
+{% endblock %}
+{% block header %}{% include "experiment_header.html" with page=template_header %}{% endblock %}
+
+{% block content %}
+<div class="col-lg-10">
+    {% csrf_token %}
+    {% include "sample/_inputs.html" %}
+
+    <p style="margin-top: 1em;">
+        A curation check re-runs breseq on this sample's reads against the reference with the
+        sample's curated mutations <b>applied first</b>. If the curation accounts for the reads,
+        the run predicts nothing; whatever it still predicts, and whatever evidence it still
+        cannot assign, replaces the sample's <a href="{{ evidence_url }}">Evidence</a> &mdash;
+        in the coordinates of the original reference, so it lines up with the curated
+        mutations. breseq applies <b>{{ exported }}</b> mutation{{ exported|pluralize }}
+        {% if polymorphic %}and skips <b>{{ polymorphic }}</b> polymorphic one{{ polymorphic|pluralize }}
+        (frequency not 1), which it will call again{% endif %}.
+    </p>
+
+    {% if not has_reference %}
+        <div class="alert alert-warning">This experiment has no reference genome, so there is
+            nothing to apply the curation to.</div>
+    {% elif not can_launch %}
+        <div class="alert alert-warning">{% if lock_refusal %}{{ lock_refusal }}{% else %}
+            You have read access to this experiment, so you can see its checks but cannot
+            start one.{% endif %}</div>
+    {% else %}
+    <form id="check-form">
+        <div class="form-group">
+            <label>Reads</label>
+            {% if reads.source == 'kept' %}
+                <p class="form-control-static">The reads this sample was analysed from are kept:
+                    {% for name in reads.files %}<code>{{ name }}</code>{% if not forloop.last %}, {% endif %}{% endfor %}
+                    ({{ reads.bytes|filesizeformat }}).</p>
+            {% elif reads.source == 'sra' %}
+                <p class="form-control-static">This sample's reads are not kept; they will be
+                    fetched again from the SRA:
+                    {% for accession in reads.accessions %}<code>{{ accession }}</code>{% if not forloop.last %}, {% endif %}{% endfor %}.
+                    They are kept afterwards for the next check.</p>
+            {% else %}
+                <p class="help-block">This sample's reads are not kept and it records no SRA
+                    accession. Drop its read files here; they are kept afterwards for the next
+                    check.</p>
+                <div id="breseq-dropzone" style="border: 2px dashed #999; border-radius: 6px;
+                     padding: 2em; text-align: center; color: #666; background: #fafafa;
+                     cursor: pointer;">
+                    <p style="margin: 0;">Drag &amp; drop this sample's read files here, or click
+                       to choose.</p>
+                    <input type="file" id="breseq-file-input" multiple style="display: none;">
+                </div>
+                <div id="breseq-file-list" style="margin-top: 0.6em;"></div>
+            {% endif %}
+        </div>
+
+        <div class="form-group">
+            <label for="check-arguments">breseq arguments</label>
+            <input type="text" class="form-control" id="check-arguments" value="{{ arguments }}"
+                   placeholder="as the sample was analysed">
+            <small class="help-block">Prefilled from the sample's own run where there was one.
+                <code>--apply-check</code> is added by this page.</small>
+        </div>
+        <div class="checkbox">
+            <label><input type="checkbox" id="check-population" {% if population_sample %}checked{% endif %}>
+                Population sample (run with <code>-p</code>)</label>
+        </div>
+        <div class="form-group">
+            <label for="check-coverage-limit">Limit coverage (<code>-l</code>, blank for every read)</label>
+            <input type="number" class="form-control" id="check-coverage-limit" min="1" step="any"
+                   value="{{ coverage_limit|default_if_none:'' }}" style="max-width: 10em;">
+        </div>
+        {% if read_step_choices %}
+        <div class="form-group">
+            <label>Read steps</label>
+            {% for choice in read_step_choices %}
+            <div class="checkbox">
+                <label><input type="checkbox" class="check-read-step" value="{{ choice.name }}"
+                              {% if choice.checked %}checked{% endif %}{% if not choice.available %} disabled{% endif %}>
+                    {{ choice.label }}{% if not choice.available %} <small>({{ choice.why }})</small>{% endif %}</label>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        <div id="breseq-progress" style="display: none; margin: 0.6em 0;">
+            <div class="progress" style="margin-bottom: 0.4em;">
+                <div class="progress-bar" id="breseq-progress-bar" style="width: 0%;">0%</div>
+            </div>
+            <small id="breseq-progress-text" style="color: #666;"></small>
+        </div>
+        <button type="submit" class="btn btn-primary" id="check-submit">Run the check</button>
+        <a class="btn btn-link" href="{{ evidence_url }}">back to the evidence</a>
+        <div id="check-error"></div>
+        <div id="check-note"></div>
+    </form>
+    {% endif %}
+
+    <h4 style="margin-top: 1.5em;">Checks of this sample</h4>
+    <div id="breseq-runs"></div>
+
+    {{ check_config|json_script:"check-config" }}
+    {{ runs|json_script:"check-runs" }}
+    <script src="{% static "mutint_breseq/check.js" %}?v={{ asset_version }}"></script>
+</div>
+{% endblock %}

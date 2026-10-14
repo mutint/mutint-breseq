@@ -43,9 +43,11 @@ from mutint_import.import_lock import ImportInProgress
 from mutint_jobs import jobs, logs, processes
 from mutint_sample import inputs
 
-from mutint_breseq import mate_check, pairing, runner
+from mutint_breseq import evidence, mate_check, pairing, runner, storage
 from mutint_breseq.models import (
+    KIND_CHECK,
     STATUS_CANCELLED,
+    STATUS_CHECKED,
     STATUS_FAILED,
     STATUS_IMPORTED,
     STATUS_RUNNING,
@@ -281,6 +283,17 @@ def run_breseq(context, run_id):
         return None
 
     experiment = run.experiment
+    if run.kind == KIND_CHECK:
+        # A check is about one sample and one curated file, and either can have gone in the
+        # hours between enqueue and execution. A sentence rather than a traceback.
+        if run.sample_id is None:
+            _fail(run, "The sample this check was for has been deleted.")
+            raise RuntimeError("check %s has no sample" % run.pk)
+        if not os.path.isfile(run.curated_gd_path()):
+            _fail(run, "This check's curated GenomeDiff is no longer on disk. Launch it again.")
+            raise RuntimeError("check %s has no curated.gd" % run.pk)
+    apply_check = run.curated_gd_path() if run.kind == KIND_CHECK else None
+
     run.status = STATUS_RUNNING
     run.started_at = timezone.now()
     run.save(update_fields=["status", "started_at"])
@@ -363,7 +376,8 @@ def run_breseq(context, run_id):
         argv = runner.build_argv(breseq, run.output_dir(), references, run.arguments, reads,
                                  processors=runner.default_processors(), dry_run=True,
                                  polymorphism=run.population_sample,
-                                 coverage_limit=run.coverage_limit)
+                                 coverage_limit=run.coverage_limit,
+                                 apply_check=apply_check)
         try:
             returncode = processes.run_tool(
                 argv, log, env=tools.tool_environment(),
@@ -441,7 +455,8 @@ def run_breseq(context, run_id):
         argv = runner.build_argv(breseq, run.output_dir(), references, run.arguments, reads,
                                  processors=runner.default_processors(),
                                  polymorphism=run.population_sample,
-                                 coverage_limit=run.coverage_limit)
+                                 coverage_limit=run.coverage_limit,
+                                 apply_check=apply_check)
         logger.info("breseq run %s starting: %s", run.pk, " ".join(argv))
 
         try:
@@ -476,11 +491,18 @@ def run_breseq(context, run_id):
     # breseq can stop having printed an error and still exit 0 -- a missing bowtie2 does
     # exactly that -- so the returncode is not the test. What the output *is* decides.
     try:
-        runner.check_output(run.output_dir())
+        runner.check_output(run.output_dir(), check=run.kind == KIND_CHECK)
     except runner.BreseqUnusable as unusable:
         _fail(run, str(unusable), log=output)
         raise
 
+    if run.kind == KIND_CHECK:
+        return _finish_check(run, reads, paired, downloaded, output, queue_id)
+    return _finish_analysis(run, experiment, reads, paired, downloaded, output, queue_id)
+
+
+def _finish_analysis(run, experiment, reads, paired, downloaded, output, queue_id):
+    """Import what breseq made as a sample, keep the reads, clean up."""
     holder = "mutint_breseq run %s" % run.pk
     try:
         _wait_for_import_lock(holder, queue_id)
@@ -518,8 +540,10 @@ def run_breseq(context, run_id):
     # The sample exists now, so whatever a read step kept about these reads can say which
     # sample it belongs to.
     attach_read_steps(run.read_steps, run.producer_key(), sample)
-    # Everything worth keeping -- data/'s four files and breseq's HTML report -- is already in
-    # the store under the sample, put there by the importer above.
+    # The reads go under the sample for a later curation check; everything else worth
+    # keeping -- data/'s four files and breseq's HTML report -- is already in the store under
+    # the sample, put there by the importer above.
+    _keep_reads(run, sample, paired)
     runner.cleanup_after_import(run.directory(), run.output_dir())
 
     run.status = STATUS_IMPORTED
@@ -530,6 +554,63 @@ def run_breseq(context, run_id):
     logger.info("breseq run %s imported %s mutations as sample %s",
                 run.pk, entry.get("mutations"), getattr(sample, "pk", None))
     return entry.get("mutations")
+
+
+def _finish_check(run, reads, paired, downloaded, output, queue_id):
+    """Record what a check left as the sample's evidence, keep the reads, clean up.
+
+    No import lock: nothing here creates a sample, a population or a mutation. The ingest
+    replaces one sample's evidence rows in one transaction and copies breseq's report under
+    the sample -- see `evidence.replace_from_check`.
+    """
+    from mutint_sample.models import Sample
+
+    sample = Sample.objects.filter(pk=run.sample_id).first()
+    if sample is None:
+        _fail(run, "The sample this check was for was deleted while it ran.", log=output)
+        raise RuntimeError("check %s lost its sample" % run.pk)
+
+    try:
+        summary = evidence.replace_from_check(
+            sample, os.path.join(run.output_dir(), "data", "output.gd"),
+            os.path.join(run.output_dir(), runner.REPORT_RELATIVE_PATH), run=run)
+    except Exception as exc:
+        _fail(run, "breseq finished but its check could not be recorded: %s" % exc,
+              log=output)
+        raise
+
+    attach_read_steps(run.read_steps, run.producer_key(), sample)
+    # A check run from the sample's own kept reads was handed hard links to them; one run
+    # from a fresh drop or a download leaves its reads behind for the next check.
+    if (run.check_summary or {}).get("reads_source") != "kept":
+        _keep_reads(run, sample, paired)
+    runner.cleanup_after_import(run.directory(), run.output_dir())
+
+    run.status = STATUS_CHECKED
+    run.finished_at = timezone.now()
+    run.error = ""
+    run.check_summary = dict(run.check_summary or {}, residual_mutations=summary.residual_mutations,
+                             evidence=summary.evidence,
+                             carried_dismissals=summary.carried_dismissals,
+                             report_stored=summary.report_stored)
+    run.save(update_fields=["status", "finished_at", "error", "check_summary"])
+    logger.info("breseq check %s left %d residual mutation(s) and %d item(s) of evidence "
+                "for sample %s", run.pk, summary.residual_mutations, summary.evidence,
+                sample.pk)
+    return summary.residual_mutations
+
+
+def _keep_reads(run, sample, paired):
+    """Move the run's untrimmed reads under the sample and say so on its row.
+
+    What is moved is `reads/` as it stands -- after the mate check renamed anything it took
+    apart, before any step rewrote a file -- so a later check gets what this run was given.
+    """
+    if sample is None:
+        return
+    names = runner.keep_reads(run.reads_dir(), store.sample_reads_dir(sample.pk))
+    if names:
+        storage.record_kept(sample, names, paired)
 
 
 def _mark_population_sample(sample):

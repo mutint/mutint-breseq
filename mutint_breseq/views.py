@@ -18,12 +18,15 @@ from django.http import Http404, JsonResponse
 from django.shortcuts import render
 from django.urls import reverse
 from django.views.decorators.csrf import ensure_csrf_cookie
+from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 import mutint_sample.views.common
 from mutint_common import preferences, read_step_registry, store, tools
 from mutint_common.fileserve import serve_file
+from mutint_common.read_step_registry import STAGE_TRANSFORM
 from mutint_common.util import get_user_context
+from mutint_experiment import paths as paths_module
 from mutint_experiment.models import Experiment
 from mutint_experiment.permissions import (
     can_edit_experiment,
@@ -38,12 +41,16 @@ from mutint_jobs import jobs as jobs_api
 from mutint_jobs import processes
 from mutint_import.upload_session import UploadError
 
-from mutint_breseq import read_names, runner, tasks
+from mutint_breseq import evidence as evidence_module
+from mutint_breseq import read_names, runner, storage, tasks
 from mutint_breseq.models import (
     COMPONENT,
+    KIND_ANALYSIS,
+    KIND_CHECK,
     STATUS_QUEUED,
     STATUS_RUNNING,
     BreseqRun,
+    Evidence,
 )
 
 logger = logging.getLogger("mutint_breseq.views")
@@ -168,8 +175,11 @@ def breseq(request):
     return render(request, "breseq/launch.html", context)
 
 
-def _supersede_in_flight(experiment, sample_name, user):
+def _supersede_in_flight(experiment, sample_name, user, kind=KIND_ANALYSIS):
     """Stop any run already queued or running for this sample. Returns how many were stopped.
+
+    Of this `kind` only: a second check of a sample stops the first, and leaves an analysis
+    of the same name alone -- the two write different things.
 
     Two runs writing one sample race, and the loser is whichever finishes first: the import
     supersedes a sample's calls rather than adding to them, so the older run's output is
@@ -182,7 +192,7 @@ def _supersede_in_flight(experiment, sample_name, user):
     this asks, and the task is what records the cancellation and throws the work away.
     """
     in_flight = BreseqRun.objects.filter(
-        experiment=experiment, sample_name=sample_name,
+        experiment=experiment, sample_name=sample_name, kind=kind,
         status__in=(STATUS_QUEUED, STATUS_RUNNING)).exclude(task_result_id="")
     stopped = jobs_api.request_cancel_for(
         list(in_flight.values_list("task_result_id", flat=True)), by=user)
@@ -279,8 +289,13 @@ def _read_steps(payload):
             read_step_registry.clean_selection(names, check_available=True)]
 
 
-def _run_rows(experiment):
-    runs = list(BreseqRun.objects.filter(experiment=experiment).select_related("sample"))
+def _run_rows(experiment, sample=None, kind=None):
+    runs = BreseqRun.objects.filter(experiment=experiment).select_related("sample")
+    if sample is not None:
+        runs = runs.filter(sample=sample)
+    if kind is not None:
+        runs = runs.filter(kind=kind)
+    runs = list(runs)
     # One query for every run's log link, through core rather than by querying `Job` here: a
     # plugin holds the queue's result id, which is what it was handed, and `mutint_jobs` owns
     # the mapping from that to a page. Runs whose job has written nothing are simply absent.
@@ -290,6 +305,9 @@ def _run_rows(experiment):
     for run in runs:
         rows.append({
             "id": run.pk,
+            "kind": run.kind,
+            # What a check was handed and found; `{}` for an analysis.
+            "check_summary": run.check_summary or {},
             "sample_name": run.sample_name,
             "arguments": run.arguments,
             "read_files": run.read_files,
@@ -321,7 +339,15 @@ def _run_rows(experiment):
             # report is stored under the sample by mutint-core's importer, so the link exists
             # exactly when the sample does.
             "report_url": ("/mutations/report/%d/" % run.sample_id
-                           if run.sample_id else None),
+                           if run.sample_id and run.kind == KIND_ANALYSIS else None),
+            # A check's results: the Evidence tab, and its own report beside the sample's.
+            "evidence_url": ("/breseq/evidence?experiment_id=%d&sample_id=%d"
+                             % (experiment.id, run.sample_id)
+                             if run.sample_id and run.kind == KIND_CHECK else None),
+            "check_report_url": ("/mutations/report/%d/check/" % run.sample_id
+                                 if run.sample_id and run.kind == KIND_CHECK
+                                 and run.sample is not None
+                                 and run.sample.check_report_stored else None),
             # What the run's tools printed, whole and while they are still printing it. The
             # `log` field beside this is the tail, and only after the run has finished.
             "log_url": log_urls.get(run.task_result_id, ""),
@@ -418,7 +444,8 @@ def _coverage_limit(raw):
     return value
 
 
-def _preflight(experiment, arguments, polymorphism=False, coverage_limit=None):
+def _preflight(experiment, arguments, polymorphism=False, coverage_limit=None,
+               apply_check_text=None):
     """Ask breseq whether it would accept this command line. Returns a refusal, or None.
 
     **Before the upload is claimed**, which is the whole point of doing it here: a rejected
@@ -447,10 +474,19 @@ def _preflight(experiment, arguments, polymorphism=False, coverage_limit=None):
         # files that are not there would fail for the wrong reason.
         references = runner.reference_arguments(
             experiment, os.path.join(scratch, "reference"), reference)
+        # A check's curated GenomeDiff, written here for the same reason the FASTQ is: the
+        # dry run checks that the file exists, and it is the dry run that says whether this
+        # breseq knows the flag at all.
+        apply_check = None
+        if apply_check_text is not None:
+            apply_check = os.path.join(scratch, "curated.gd")
+            with open(apply_check, "w") as handle:
+                handle.write(apply_check_text)
         argv = runner.build_argv(breseq, os.path.join(scratch, "output"), references,
                                  arguments, [reads],
                                  processors=runner.default_processors(), dry_run=True,
-                                 polymorphism=polymorphism, coverage_limit=coverage_limit)
+                                 polymorphism=polymorphism, coverage_limit=coverage_limit,
+                                 apply_check=apply_check)
         # `run_tool` writes to a file and hands back a returncode, so the output is captured by
         # giving it one in the scratch directory. A launch has no job and so no job log, and
         # this needs no capture mode in core.
@@ -474,8 +510,20 @@ def _preflight(experiment, arguments, polymorphism=False, coverage_limit=None):
 
     logger.info("breseq refused a command line for experiment %s: %r",
                 experiment.id, arguments)
-    return ("breseq will not accept this command line:\n\n%s"
-            % (runner.refusal_from(output) or "it exited %d without saying why." % returncode))
+    refusal = runner.refusal_from(output) or "it exited %d without saying why." % returncode
+    if apply_check_text is not None and "apply-check" in refusal:
+        # The one refusal a check can meet that an analysis cannot, named rather than left
+        # as breseq's unknown-option text: the installed breseq predates the flag.
+        return ("The installed breseq (%s) does not have --apply-check, which arrived in "
+                "prerelease g25617bb8. `./mutint start` installs the pinned build."
+                % breseq)
+    return "breseq will not accept this command line:\n\n%s" % refusal
+
+
+#: Refused in the arguments box of both launchers: an input-file option given twice is a
+#: real ambiguity, and a check is the page that passes it.
+_APPLY_CHECK_TYPED = ("--apply-check is what a curation check passes, from the Evidence tab. "
+                      "It cannot be typed here.")
 
 
 @require_POST
@@ -538,10 +586,12 @@ def launch(request):
     try:
         # Parsed now rather than in the worker, so an unbalanced quote is a message beside the
         # box rather than a run that fails four hours later having done nothing.
-        runner.split_arguments(arguments)
+        typed = runner.split_arguments(arguments)
     except ValueError as exc:
         return JsonResponse({"error": "Those arguments could not be read: %s" % exc},
                             status=400)
+    if runner.APPLY_CHECK_FLAG in typed:
+        return JsonResponse({"error": _APPLY_CHECK_TYPED, "field": "arguments"}, status=400)
 
     # The Population sample checkbox. It decides two things at once -- `-p` on breseq's
     # command line, and the clonality the imported sample is recorded with -- so it is read
@@ -1069,3 +1119,602 @@ def run_delete(request, pk):
     experiment = run.experiment
     run.delete()
     return JsonResponse({"deleted": True, "runs": _run_rows(experiment)})
+
+
+# --- the Evidence tab -------------------------------------------------------------------------
+
+EVIDENCE_STATUSES = ("open", "resolved", "dismissed", "all")
+
+#: How far from an evidence row's position the Resolve-with menu looks for a mutation.
+NEARBY_BASES = 10000
+
+
+def _sample_in(experiment, sample_id):
+    """The sample `sample_id` names, scoped to the experiment, or None."""
+    from mutint_sample.models import Sample
+
+    try:
+        return (Sample.objects
+                .filter(**{paths_module.to_experiment(): experiment}, pk=int(sample_id))
+                .select_related("population")
+                .first())
+    except (TypeError, ValueError):
+        return None
+
+
+def _evidence_summary(row):
+    """One line about the row, from what breseq wrote beside its position."""
+    record = row.record or {}
+    kind = row.evidence_type
+    if kind == "MC":
+        return "missing coverage, %s bp; range %s..%s; coverage left %s, right %s" % (
+            (row.end - row.position + 1) if row.end is not None else "?",
+            record.get("start_range", "?"), record.get("end_range", "?"),
+            record.get("left_outside_cov", "?"), record.get("right_outside_cov", "?"))
+    if kind == "JC":
+        return "new junction, %s reads, coverage %s, score %s; overlap %s%s" % (
+            record.get("new_junction_read_count", "?"), record.get("new_junction_coverage", "?"),
+            record.get("pos_hash_score", "?"), record.get("overlap", "?"),
+            ("; %s" % record["unique_read_sequence"]
+             if record.get("unique_read_sequence") not in (None, "", ".") else ""))
+    if kind == "CN":
+        return "copy number %s" % record.get("copy_number", "?")
+    if kind in ("SC", "MP"):
+        return "%s on strand %s" % (
+            "soft-clipped reads" if kind == "SC" else "reads with a missing mate",
+            record.get("strand", "?"))
+    if kind in ("DP", "PD"):
+        return "%s, %s pairs" % (
+            "discordant pairs" if kind == "DP" else "pair distance",
+            record.get("read_count", record.get("new_junction_read_count", "?")))
+    if len(kind) == 3:
+        # A residual mutation: its own line, minus breseq's bookkeeping, which is the thing a
+        # curator would type.
+        from genomediff.records import Record
+        fields = {key: value for key, value in record.items()
+                  if key not in ("type", "id", "parent_ids") and not key.startswith("original_")}
+        try:
+            line = str(Record(kind, record.get("id"), parent_ids=None, **fields))
+        except Exception:  # noqa: BLE001 -- a record the package will not format still shows
+            line = " ".join("%s=%s" % item for item in sorted(fields.items()))
+        return "residual %s: %s" % (kind, line.replace("\t", " "))
+    return ""
+
+
+def _locus_text(row):
+    offset = (row.record or {}).get("original_position_offset") or \
+        (row.record or {}).get("original_start_offset") or \
+        (row.record or {}).get("original_side_1_position_offset")
+    plus = "+%s" % offset if offset else ""
+    if row.is_junction:
+        strand = lambda name: "+" if str((row.record or {}).get(name)) == "1" else "-"  # noqa: E731
+        offset_2 = (row.record or {}).get("original_side_2_position_offset")
+        return "%s:%s%s (%s) ↔ %s:%s%s (%s)" % (
+            row.seq_id, row.position, plus, strand("side_1_strand"),
+            row.seq_id_2 or row.seq_id, row.position_2, "+%s" % offset_2 if offset_2 else "",
+            strand("side_2_strand"))
+    if row.end is not None and row.end != row.position:
+        return "%s:%s%s-%s" % (row.seq_id, row.position, plus, row.end)
+    return "%s:%s%s" % (row.seq_id, row.position, plus)
+
+
+#: What breseq names an item's evidence page, by type -- `output.cpp`'s `PREFIX`es. The
+#: coverage-based kinds have a plot page (and MC and the junction kinds a page per side,
+#: which are not linked here); the rest are `<TYPE>_<id>.html`.
+_PAGE_PREFIX = {"MC": "MC_PLOT", "CN": "CN_PLOT"}
+
+
+def _report_url(sample, row):
+    """The row's page in the stored report of the run it came from, or None.
+
+    A residual mutation has no page of its own in breseq's report; its row links to the
+    report's index, where breseq's own mutation table shows it.
+    """
+    if row.origin == "check":
+        if not sample.check_report_stored:
+            return None
+        prefix = "/mutations/report/%d/check/" % sample.pk
+    else:
+        if not sample.report_stored:
+            return None
+        prefix = "/mutations/report/%d/" % sample.pk
+    if row.evidence_type not in Evidence.EVIDENCE_TYPES or row.source_id is None:
+        return prefix
+    return "%s?page=evidence.html#%s_%s.html" % (
+        prefix, _PAGE_PREFIX.get(row.evidence_type, row.evidence_type), row.source_id)
+
+
+def _browse_url(sample, seq_id, position, end=None):
+    if not sample.bam_stored:
+        return None
+    return "/mutations/browse?sample_id=%d&locus=%s:%d-%d" % (
+        sample.pk, seq_id, position, end if end is not None else position)
+
+
+def _evidence_rows(sample, rows):
+    statuses = evidence_module.statuses_for(rows)
+    out = []
+    for row in rows:
+        suggestion = evidence_module.suggested_mutation(row)
+        out.append({
+            "id": row.pk,
+            "type": row.evidence_type,
+            "origin": row.origin,
+            "locus": _locus_text(row),
+            "summary": _evidence_summary(row),
+            "status": statuses[row.pk],
+            "resolved_mutation_id": row.resolved_mutation_id,
+            "dismiss_note": row.dismiss_note,
+            "dismissed_by": (row.dismissed_by.username if row.dismissed_by_id and row.dismissed_by
+                             else ""),
+            "report_url": _report_url(sample, row),
+            "browse_url": _browse_url(sample, row.seq_id, row.position, row.end),
+            "browse_url_2": (_browse_url(sample, row.seq_id_2 or row.seq_id, row.position_2)
+                             if row.is_junction and row.position_2 is not None else None),
+            "suggestion": suggestion,
+            "suggested_type": suggestion.get("__type", ""),
+        })
+    return out
+
+
+def _nearby_mutations(sample):
+    """The sample's mutations, as `{id, label, seq_id, position}`, for the Resolve-with menu.
+
+    All of them, once, rather than a query per row: the page filters by distance in the
+    browser, where the row's position is already in hand.
+    """
+    from mutint_sample.models import MutationCall
+
+    calls = (MutationCall.objects.filter(sample=sample)
+             .select_related("mutation").order_by("mutation__seq_id", "mutation__start_position"))
+    return [{"id": call.mutation_id,
+             "label": "%s %s:%s %s" % (call.mutation.mutation_type, call.mutation.seq_id,
+                                       call.mutation.start_position,
+                                       call.mutation.sequence_change or ""),
+             "seq_id": call.mutation.seq_id, "position": call.mutation.start_position}
+            for call in calls]
+
+
+@ensure_csrf_cookie
+def evidence(request):
+    """The Evidence tab of the Curate page: what breseq could not explain, per sample."""
+    from mutint_curate import validation
+    from mutint_sample.models import ReferenceSequences
+    from mutint_sample.util import get_ordered_sample_dict
+
+    context = get_user_context(request.user)
+    try:
+        experiment = mutint_sample.views.common.get_experiment(request)
+    except Experiment.DoesNotExist:
+        return mutint_sample.views.common.no_experiment_selected(
+            request, context, logger, "evidence")
+    except ValueError:
+        return render(request, "403.html", context, status=403)
+
+    sample_dict = get_ordered_sample_dict(experiment.id, include_ancestor=True)
+    sample = None
+    try:
+        sample = sample_dict.get(int(request.GET.get("sample_id")))
+    except (TypeError, ValueError):
+        pass
+    if sample is None and sample_dict:
+        sample = next(iter(sample_dict.values()))
+
+    status = request.GET.get("status") or "open"
+    if status not in EVIDENCE_STATUSES:
+        status = "open"
+    type_filter = (request.GET.get("type") or "").upper()[:3]
+
+    rows = []
+    counts = {"open": 0, "resolved": 0, "dismissed": 0}
+    types = []
+    check_record = {}
+    if sample is not None:
+        every = list(Evidence.objects.filter(sample=sample).select_related("dismissed_by"))
+        statuses = evidence_module.statuses_for(every)
+        for row in every:
+            counts[statuses[row.pk]] += 1
+        types = sorted({row.evidence_type for row in every})
+        chosen = [row for row in every
+                  if (status == "all" or statuses[row.pk] == status)
+                  and (not type_filter or row.evidence_type == type_filter)]
+        rows = _evidence_rows(sample, chosen)
+        check_record = sample.record(evidence_module.CHECK_RECORD, component=COMPONENT)
+
+    reference_row = ReferenceSequences.objects.filter(experiment=experiment).first()
+    can_edit = can_edit_experiment(request.user, experiment)
+    context.update(experiment.experiment_context())
+    context.update({
+        "experiment": experiment,
+        "experiment_id": experiment.id,
+        "sample_list": list(sample_dict.values()),
+        "selected_sample": sample,
+        "selected_sample_id": sample.id if sample is not None else None,
+        "status": status,
+        "statuses": EVIDENCE_STATUSES,
+        "type_filter": type_filter,
+        "types": types,
+        "rows": rows,
+        "counts": counts,
+        "check_record": check_record,
+        "can_edit": can_edit,
+        "lock_refusal": experiment_lock_refusal(experiment),
+        "has_reference": reference_row is not None,
+        "schema": validation.form_schema(),
+        "seq_ids": sorted(validation.contig_lengths(reference_row)),
+        "nearby": _nearby_mutations(sample) if sample is not None else [],
+        "nearby_bases": NEARBY_BASES,
+        "check_url": ("/breseq/check?experiment_id=%d&sample_id=%d"
+                      % (experiment.id, sample.id)
+                      if sample is not None and can_edit and reference_row is not None
+                      else ""),
+        "title": "Evidence — %s" % experiment.name,
+        "template_header": "Evidence",
+    })
+    return render(request, "breseq/evidence.html", context)
+
+
+def _evidence_write(request):
+    """`(experiment, rows)` for an evidence endpoint, or a JSON refusal.
+
+    Body: `experiment_id`, `evidence_ids` (JSON list). Every row is checked to be the
+    experiment's: two ids arrive from the client and nothing else stops one experiment's
+    rows being changed through another's page.
+    """
+    if not request.user.is_authenticated:
+        return None, None, JsonResponse({"error": "You must be signed in."}, status=403)
+    try:
+        experiment = Experiment.objects.get(pk=request.POST.get("experiment_id"))
+    except (Experiment.DoesNotExist, ValueError, TypeError):
+        return None, None, JsonResponse({"error": "No such experiment."}, status=404)
+    if not can_edit_experiment(request.user, experiment):
+        return None, None, JsonResponse(
+            {"error": experiment_lock_refusal(experiment)
+                      or "You cannot change this experiment."}, status=403)
+    try:
+        ids = [int(value) for value in json.loads(request.POST.get("evidence_ids") or "[]")]
+    except (ValueError, TypeError):
+        return None, None, JsonResponse({"error": "Malformed request."}, status=400)
+    if not ids:
+        return None, None, JsonResponse({"error": "Nothing was selected."}, status=400)
+    rows = list(Evidence.objects.filter(
+        pk__in=ids, **{"sample__" + paths_module.to_experiment(): experiment}))
+    if len(rows) != len(set(ids)):
+        return None, None, JsonResponse(
+            {"error": "Some of that evidence is not in this experiment."}, status=404)
+    return experiment, rows, None
+
+
+@require_POST
+def evidence_dismiss(request):
+    """Mark evidence as looked at and not worth a mutation, with a note."""
+    experiment, rows, refusal = _evidence_write(request)
+    if refusal is not None:
+        return refusal
+    note = (request.POST.get("note") or "").strip()[:2000]
+    now = timezone.now()
+    for row in rows:
+        row.dismissed_at = now
+        row.dismissed_by = request.user
+        row.dismiss_note = note
+        row.save(update_fields=["dismissed_at", "dismissed_by", "dismiss_note"])
+    return JsonResponse({"dismissed": len(rows)})
+
+
+@require_POST
+def evidence_reopen(request):
+    """Take a dismissal back, or unlink a mutation. The row is open again."""
+    experiment, rows, refusal = _evidence_write(request)
+    if refusal is not None:
+        return refusal
+    for row in rows:
+        row.dismissed_at = None
+        row.dismissed_by = None
+        row.dismiss_note = ""
+        row.resolved_mutation = None
+        row.save(update_fields=["dismissed_at", "dismissed_by", "dismiss_note",
+                                "resolved_mutation"])
+    return JsonResponse({"reopened": len(rows)})
+
+
+@require_POST
+def evidence_resolve(request):
+    """Link evidence to the mutation that accounts for it -- one just added through core's
+    Add form, or one the sample already carries.
+
+    `mutation_id` must be one of this experiment's, and the row is resolved only while that
+    mutation has a call in the row's sample; linking a mutation the sample does not carry is
+    refused rather than recorded as a resolution that would read as open.
+    """
+    from mutint_sample.models import Mutation, MutationCall
+
+    experiment, rows, refusal = _evidence_write(request)
+    if refusal is not None:
+        return refusal
+    try:
+        mutation = Mutation.objects.get(pk=request.POST.get("mutation_id"),
+                                        experiment=experiment)
+    except (Mutation.DoesNotExist, ValueError, TypeError):
+        return JsonResponse({"error": "No such mutation in this experiment."}, status=404)
+    carrying = set(MutationCall.objects.filter(mutation=mutation)
+                   .values_list("sample_id", flat=True))
+    missing = [row for row in rows if row.sample_id not in carrying]
+    if missing:
+        return JsonResponse(
+            {"error": "That mutation is not called in the sample this evidence belongs to, "
+                      "so it cannot account for it."}, status=400)
+    for row in rows:
+        row.resolved_mutation = mutation
+        row.dismissed_at = None
+        row.dismissed_by = None
+        row.dismiss_note = ""
+        row.save(update_fields=["resolved_mutation", "dismissed_at", "dismissed_by",
+                                "dismiss_note"])
+    return JsonResponse({"resolved": len(rows), "mutation_id": mutation.pk})
+
+
+# --- curation checks ----------------------------------------------------------------------------
+
+def check_sample_links(sample, request):
+    """**Check curation** on a sample's page, for somebody who may run one."""
+    if request is None or not getattr(request.user, "is_authenticated", False):
+        return []
+    experiment = sample.experiment
+    if not can_edit_experiment(request.user, experiment):
+        return []
+    if not reference_store.has_reference(experiment):
+        return []
+    return [("Check curation",
+             "/breseq/check?experiment_id=%d&sample_id=%d" % (experiment.id, sample.pk),
+             "Re-run breseq with this sample's curated mutations applied, to see what is left")]
+
+
+def _reads_source_for(sample):
+    """How a check of this sample would get its reads: `kept`, `sra` or `drop`, with detail."""
+    kept = storage.kept_reads(sample)
+    if kept:
+        return {"source": "kept",
+                "files": [os.path.basename(path) for path in kept],
+                "bytes": sum(os.path.getsize(path) for path in kept),
+                "accessions": []}
+    from mutint_sample import inputs
+    sra_values = [entry.get("value") for entry in sample.inputs
+                  if entry.get("kind") == inputs.KIND_SRA and entry.get("value")]
+    if sra_values:
+        return {"source": "sra", "files": [], "bytes": 0,
+                "accessions": sorted(set(sra_values))}
+    return {"source": "drop", "files": [], "bytes": 0, "accessions": []}
+
+
+def _curation_counts(sample):
+    """How many mutations the curated `.gd` carries, and how many breseq will skip."""
+    from mutint_sample.models import MutationCall
+
+    calls = MutationCall.objects.filter(sample=sample)
+    exported = calls.count()
+    polymorphic = calls.filter(frequency__isnull=False).exclude(frequency=1).count()
+    return exported, polymorphic
+
+
+@ensure_csrf_cookie
+def check(request):
+    """The check launcher: re-run breseq on a sample's reads with its curation applied."""
+    if not request.user.is_authenticated:
+        return render(request, "403.html", get_user_context(request.user), status=403)
+
+    context = get_user_context(request.user)
+    try:
+        experiment = mutint_sample.views.common.get_experiment(request)
+    except Experiment.DoesNotExist:
+        return mutint_sample.views.common.no_experiment_selected(
+            request, context, logger, "breseq check")
+    except ValueError:
+        return render(request, "403.html", context, status=403)
+
+    sample = _sample_in(experiment, request.GET.get("sample_id"))
+    if sample is None:
+        return render(request, "404.html", context, status=404)
+
+    last = (BreseqRun.objects.filter(sample=sample, kind=KIND_ANALYSIS)
+            .order_by("-created_at").first())
+    exported, polymorphic = _curation_counts(sample)
+    reads = _reads_source_for(sample)
+
+    context.update(experiment.experiment_context())
+    context.update({
+        "experiment": experiment,
+        "experiment_id": experiment.id,
+        "sample": sample,
+        "has_reference": reference_store.has_reference(experiment),
+        "can_launch": can_edit_experiment(request.user, experiment),
+        "lock_refusal": experiment_lock_refusal(experiment),
+        "reads": reads,
+        "exported": exported,
+        "polymorphic": polymorphic,
+        "arguments": last.arguments if last is not None else "",
+        "coverage_limit": last.coverage_limit if last is not None else None,
+        "population_sample": not sample.is_clonal,
+        # Every registered step, drawn as on the launcher, with the inspecting ones unticked:
+        # a QC report of reads already reported on is work for nothing, and trimming is what
+        # the analysis did.
+        "read_step_choices": [
+            dict(choice, checked=choice["checked"]
+                 and (last is None or choice["name"] in (last.read_steps or []))
+                 and read_step_registry.get_step(choice["name"]).stage == STAGE_TRANSFORM)
+            for choice in _read_step_choices()],
+        "component": COMPONENT,
+        "check_config": {"experiment_id": experiment.id, "sample_id": sample.pk,
+                         "component": COMPONENT, "reads_source": reads["source"]},
+        "runs": _run_rows(experiment, sample=sample, kind=KIND_CHECK),
+        "evidence_url": "/breseq/evidence?experiment_id=%d&sample_id=%d"
+                        % (experiment.id, sample.pk),
+        "title": "Check curation — %s" % sample.label,
+        "template_header": "Check curation",
+    })
+    return render(request, "breseq/check.html", context)
+
+
+@require_POST
+def check_launch(request):
+    """Start a curation check of one sample.
+
+    Body: {upload_id, accessions, arguments, read_steps, population_sample, coverage_limit,
+    reads_source}. The order is `launch`'s, and every refusal before the staging claim costs
+    nothing. What the run is handed is the sample's current curated GenomeDiff
+    (`gd_import.export_gd_text`) and its reads -- the kept copy, a download, or a fresh drop.
+    """
+    from mutint_import.gd_import import export_gd_text
+
+    if not request.user.is_authenticated:
+        return JsonResponse({"error": "You must be signed in."}, status=403)
+    experiment = _experiment_or_none(request)
+    if experiment is None:
+        return JsonResponse({"error": "Unknown experiment."}, status=404)
+    sample = _sample_in(experiment, request.GET.get("sample_id"))
+    if sample is None:
+        return JsonResponse({"error": "Unknown sample."}, status=404)
+    if not can_edit_experiment(request.user, experiment):
+        return JsonResponse(
+            {"error": experiment_lock_refusal(experiment)
+                      or "You cannot change this experiment."}, status=403)
+    if not reference_store.has_reference(experiment):
+        return JsonResponse(
+            {"error": "This experiment has no reference genome, so there is nothing to "
+                      "apply the curation to."}, status=400)
+
+    payload = _payload(request)
+    arguments = (payload.get("arguments") or "").strip()
+    if len(arguments) > MAX_ARGUMENTS_CHARS:
+        return JsonResponse({"error": "That is a very long argument list."}, status=400)
+    try:
+        typed = runner.split_arguments(arguments)
+    except ValueError as exc:
+        return JsonResponse({"error": "Those arguments could not be read: %s" % exc},
+                            status=400)
+    if runner.APPLY_CHECK_FLAG in typed:
+        return JsonResponse({"error": _APPLY_CHECK_TYPED, "field": "arguments"}, status=400)
+    population_sample = bool(payload.get("population_sample", False))
+    try:
+        coverage_limit = _coverage_limit(payload.get("coverage_limit"))
+    except CoverageLimitError as refusal:
+        return JsonResponse({"error": str(refusal), "field": "coverage_limit"}, status=400)
+    try:
+        read_steps = _read_steps(payload)
+    except ValueError as refusal:
+        return JsonResponse({"error": str(refusal), "field": "read_steps"}, status=400)
+
+    # Where the reads come from, decided here and recorded on the row: the task treats a
+    # file in `reads/` the same whichever way it arrived.
+    source = payload.get("reads_source") or _reads_source_for(sample)["source"]
+    upload_id = (payload.get("upload_id") or "").strip()
+    plans = []
+    kept = []
+    if source == "kept":
+        kept = storage.kept_reads(sample)
+        if not kept:
+            return JsonResponse(
+                {"error": "This sample's reads are not kept. Drop its read files, or name an "
+                          "SRA accession, to run the check."}, status=400)
+    elif source == "sra":
+        text = payload.get("accessions") or " ".join(_reads_source_for(sample)["accessions"])
+        try:
+            plans = _resolve_accessions(text)
+        except (accessions.AccessionError, sra_fetch.FetchError) as refusal:
+            return JsonResponse({"error": str(refusal), "field": "accessions"}, status=400)
+        if not plans:
+            return JsonResponse(
+                {"error": "This sample's reads are not kept and it records no SRA accession. "
+                          "Drop its read files to run the check."}, status=400)
+    elif source == "drop":
+        if not upload_id:
+            return JsonResponse(
+                {"error": "This sample's reads are not kept and it records no SRA accession. "
+                          "Drop its read files to run the check."}, status=400)
+    else:
+        return JsonResponse({"error": "Unknown reads source %r." % source}, status=400)
+
+    gd_text = export_gd_text(sample)
+    exported, polymorphic = _curation_counts(sample)
+
+    refusal = _preflight(experiment, arguments, polymorphism=population_sample,
+                         coverage_limit=coverage_limit, apply_check_text=gd_text)
+    if refusal:
+        return JsonResponse({"error": refusal}, status=400)
+
+    session = None
+    staged = {}
+    if upload_id:
+        session, error = staging.session_for(request, upload_id, COMPONENT)
+        if error:
+            return error
+        if session.experiment_id != experiment.id:
+            return JsonResponse({"error": "That upload belongs to another experiment."},
+                                status=409)
+        try:
+            staged_root = staging.claim(session)
+        except UploadError as exc:
+            return JsonResponse({"error": str(exc)}, status=409)
+        staged = _staged_files(staged_root)
+
+    def abandon():
+        if session is not None:
+            staging.abandon(session)
+
+    if source == "drop" and not staged:
+        abandon()
+        return JsonResponse({"error": "Drop this sample's read files to run the check."},
+                            status=400)
+
+    superseded = _supersede_in_flight(experiment, sample.source_name or sample.label,
+                                      request.user, kind=KIND_CHECK)
+
+    run = None
+    try:
+        run = BreseqRun.objects.create(
+            experiment=experiment,
+            created_by=request.user,
+            kind=KIND_CHECK,
+            sample=sample,
+            sample_name=sample.source_name or sample.label,
+            arguments=arguments,
+            read_steps=read_steps,
+            population_sample=population_sample,
+            coverage_limit=coverage_limit,
+            accessions=[plan.as_dict() for plan in plans],
+            check_summary={"exported": exported, "polymorphic_skipped": polymorphic,
+                           "reads_source": source},
+            status=STATUS_QUEUED)
+        store.ensure_dir(run.directory())
+        with open(run.curated_gd_path(), "w") as handle:
+            handle.write(gd_text)
+        if source == "kept":
+            names = runner.link_reads(store.sample_reads_dir(sample.pk), run.reads_dir())
+        elif staged:
+            names = _take_reads(staged, run, sorted(staged))
+        else:
+            names = sorted(sra.filenames_by_run(plans))
+        run.read_files = names
+        run.save(update_fields=["read_files"])
+    except Exception as exc:
+        logger.exception("could not prepare a breseq check for sample %s", sample.pk)
+        if run is not None:
+            run.delete()
+        abandon()
+        return JsonResponse({"error": "The check could not be prepared: %s" % exc},
+                            status=500)
+
+    if session is not None:
+        staging.close(session)
+
+    job = jobs_api.enqueue(
+        tasks.run_breseq, run.pk,
+        user=request.user,
+        label="breseq check — %s" % sample.label,
+        component=COMPONENT,
+        experiment=experiment,
+        cancellable=True)
+    run.task_result_id = job.task_result_id
+    run.save(update_fields=["task_result_id"])
+
+    return JsonResponse({"run_id": run.pk, "superseded": superseded,
+                         "runs": _run_rows(experiment, sample=sample, kind=KIND_CHECK)})

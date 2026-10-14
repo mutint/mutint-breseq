@@ -1171,3 +1171,52 @@ class RunTestCase(TestCase):
     def test_a_run_deleted_before_the_worker_reaches_it_is_not_an_error(self):
         from mutint_breseq import tasks
         self.assertIsNone(tasks.run_breseq.call(None, 999999))
+
+
+class KeptReadsAfterRunTestCase(RunTestCase):
+    """A successful run keeps its untrimmed reads under the sample, for a curation check."""
+
+    def test_a_successful_run_keeps_its_untrimmed_reads_under_the_sample(self):
+        self._launch()
+        sample = Sample.objects.get()
+        from mutint_breseq import storage
+        kept = storage.kept_reads(sample)
+        self.assertEqual(["s1_R1.fastq", "s1_R2.fastq"],
+                         sorted(os.path.basename(path) for path in kept))
+        self.assertTrue(all(path.startswith(store.sample_reads_dir(sample.pk)) for path in kept))
+        record = storage.reads_record(sample)
+        self.assertEqual((True, True), (record["kept"], record["paired"]))
+
+    def test_a_failed_run_keeps_no_reads(self):
+        os.environ["FAKE_BRESEQ_FAIL"] = "2"
+        self.addCleanup(os.environ.pop, "FAKE_BRESEQ_FAIL", None)
+        self.assertEqual(200, self._launch().status_code)
+        self.assertEqual(STATUS_FAILED, BreseqRun.objects.get().status)
+        self.assertFalse(os.path.exists(os.path.join(self.store, "samples")))
+
+    def test_deleting_the_run_leaves_the_kept_reads(self):
+        self._launch()
+        sample = Sample.objects.get()
+        run = BreseqRun.objects.get()
+        self.client.post("/breseq/run/%d/delete" % run.pk)
+        from mutint_breseq import storage
+        self.assertEqual(2, len(storage.kept_reads(sample)))
+
+    def test_the_kept_reads_are_counted_and_cleared_by_the_storage_kind(self):
+        from mutint_breseq import storage
+        self._launch()
+        sample = Sample.objects.get()
+        measured = storage.measure_reads(self.experiment)
+        self.assertEqual(sum(os.path.getsize(p) for p in storage.kept_reads(sample)), measured)
+        self.assertGreater(measured, 0)
+        storage.clear_reads(self.experiment)
+        sample.refresh_from_db()
+        self.assertEqual([], storage.kept_reads(sample))
+        self.assertEqual(0, storage.measure_reads(self.experiment))
+        self.assertFalse(storage.reads_record(sample)["kept"])
+        self.assertEqual(["s1_R1.fastq", "s1_R2.fastq"], storage.reads_record(sample)["files"])
+
+    def test_a_launch_refuses_apply_check_in_the_arguments_box(self):
+        response = self._launch(arguments="--apply-check curated.gd")
+        self.assertEqual(400, response.status_code)
+        self.assertEqual("arguments", response.json()["field"])

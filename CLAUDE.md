@@ -36,11 +36,14 @@ a project's `.gitmodules` is how a component is not installed.
 | `pairing.py` | pure: breseq's rule for which read files are mates, and which files fastp must not touch |
 | `read_names.py` | pure: what a read file's name says the sample is called, and which files are one sample |
 | `mate_check.py` | pure: whether two files that pair by name really are mates, and how to unpair them if not |
-| `tasks.py` | the `@task` — run the read steps, run breseq, check, import, clean up |
+| `tasks.py` | the `@task` — run the read steps, run breseq, check, then import (an analysis) or record what is left (a check), keep the reads, clean up |
 | `steps.py` | this plugin's own read step: fastp trimming, registered through core's `read_step_registry` |
-| `views.py` | the page, the launch endpoint, the preview, the run list; resolves accessions through core |
-| `models.py` | `BreseqRun`, and the receiver that owns its directory |
-| `static/mutint_breseq/launch.js` | the page's behaviour: the input-type menu, the boxes, the drop zone, the run list |
+| `evidence.py` | the unassigned-evidence rule (breseq's), the two writers of the `Evidence` table -- from an import and from a check -- and breseq's single-item mutation suggestions |
+| `storage.py` | the reads a sample was analysed from, kept under the sample for a check: the storage kind that counts and clears them |
+| `views.py` | the launcher, the launch endpoint, the preview, the run list; the Evidence tab and its three writes; the check launcher |
+| `models.py` | `BreseqRun` (an analysis or a check), `Evidence`, and the receiver that owns a run's directory |
+| `static/mutint_breseq/launch.js` | the launcher's behaviour: the input-type menu, the boxes, the drop zone, the run list |
+| `static/mutint_breseq/evidence.js`, `check.js` | the Evidence tab's actions, and the check launcher's one drop and one POST |
 
 The first four are pure on purpose, in the shape `mutint_sample/locus.py` is: the rules most
 likely to be changed by accident are what reaches breseq's argv, what has to be on disk before
@@ -84,7 +87,7 @@ Verified against the real channel: it resolves, and its dependencies come from b
 is already on the list. **Do not "tidy" this into a bare package name and a channel flag** —
 that is an edit to three entry scripts for one component's dependency.
 
-**The spec is pinned by build string**, currently `=*=gf7100f9a_1`. Every prerelease build
+**The spec is pinned by build string**, currently `=*=gd97757d0_2`. Every prerelease build
 reports a git-derived version (`0.40.1.dev426+gf7100f9a`), so the version cannot tell two of
 them apart and the *build* is what names one artifact. Two things about moving it are worth
 knowing before you do: the build is not always just the hash -- a rebuild of the same commit
@@ -785,10 +788,94 @@ Every ending deletes `reads/`, `steps/` and the output directory -- success thro
 keep everything, on the reasoning that a failed run is exactly when the reads matter; what
 that kept in practice was gigabytes per failed run that nobody opened, because the log -- on
 the row and under the job -- is what a person reads. A run that has to be re-done is
-re-launched from its reads. The consequence for core's `storage_registry` is that this
-plugin registers **no** storage kind: a run directory holds nothing for longer than the run
-takes. (It registered one for a commit, measured over failed runs, until there were none to
-measure.)
+re-launched from its reads.
+
+**A success keeps its untrimmed reads, under the sample.** That is the one storage kind this
+plugin registers (**Kept read files**, `storage.py`), and it exists for the curation check
+below: re-running breseq on the same reads is the whole feature, and asking somebody to find
+and re-drop twenty files per sample to check their curation is asking them not to. Under
+`store.sample_reads_dir` rather than the run directory, because `run_delete` and the receiver
+above rmtree the run's directory -- exactly when a later check still wants the reads -- and
+under the sample core reaps them with the BAM and the report. What is kept is `reads/` as
+breseq was handed it: after the mate check renamed anything it took apart, before any step
+rewrote a file. The fact is recorded on the sample's row (`supplemental_data` under this
+component's key), which is what the kind measures from; clearing it means the next check
+fetches by SRA accession or asks for a drop.
+
+### Unassigned evidence, and the check that resolves it
+
+breseq's index page lists *unassigned evidence*: an MC, JC, CN, SC, DP, MP or PD item whose
+id no mutation names in its evidence column and that carries no `reject=`
+(`filter_used_as_evidence` and `rejected_and_not_user_defined` in `output.cpp`, with
+`ignore=` entries dropped as that page drops them). Core's importer threw every one of them
+away. `evidence.replace_from_import`, registered through core's `register_sample_import_hook`,
+keeps exactly that list per sample as `Evidence` rows -- from the same parse the mutations
+come from, so a dropped folder and a run this plugin made reach it alike. **Not** the marginal
+RA/JC of `marginal.html`, which are breseq's below-threshold calls and still readable in the
+stored report, and not UN, which breseq itself shows nowhere; a table of a thousand
+sub-cutoff SNPs per sample is not a to-do list.
+
+**The Evidence tab is in Curate's strip**, through core's `curate_tab_registry`, because
+resolving evidence *is* curating. A row is resolved three ways: **Add mutation** opens core's
+own mutation form inline -- `curate/_mutation_fields.html` and `_mutation_form.js` included by
+name, `validation.form_schema()` for the dropdown -- prefilled from
+`evidence.suggested_mutation`, which is `mutation_predictor.cpp`'s single-item rules (an MC
+is a DEL; a JC whose sides face each other is a DEL, outward an AMP; a CN an AMP or DEL; a
+residual mutation from a check is itself) and never written on its own; the page posts to
+core's `/curate/add/apply`, then to `/breseq/evidence/resolve` with the `mutation_id` core
+answers. **Resolve with…** offers the sample's mutations within 10 kb. **Dismiss** takes a
+note and records who. *Resolved* is **derived, not stored**: `resolved_mutation` names the
+mutation, and the row is resolved while that mutation still has a call in the sample -- so
+deleting the call on core's Delete tab reopens the row with no hook, a restore closes it, and
+a swept mutation's `SET_NULL` is the same answer. A re-import replaces a sample's rows,
+dismissals included; the tab says so.
+
+**A curation check is the LTEE tutorial's APPLY-and-rerun cycle as one button.** breseq
+`--apply-check <gd>` (prerelease g25617bb8; see `tools.txt` for the pin) applies the
+mutations in a GenomeDiff to the reference before aligning, skips polymorphic ones with a
+warning, and writes every entry of `output.gd` with `original_*` fields -- the same position
+in the **unmutated** reference -- beside its own, plus `original_<field>_offset` for a base
+inside sequence an applied mutation inserted. The curated file is core's
+`gd_import.export_gd_text(sample)`, written to `<run>/curated.gd` at launch and kept through
+every ending; breseq's reader never resolves the `parent_ids` column, so the dangling evidence
+ids `to_gd_line` writes are harmless.
+
+A check is a `BreseqRun` with `kind="check"` and `sample` set at creation (**the sample being
+checked** -- one FK read in two tenses, and `kind` says which). **One task, a branch at the
+import step**: everything from the reads to breseq's exit is the analysis's code, error
+handling included, which is the part a second task would have copied wrong; `_finish_check`
+then calls `evidence.replace_from_check` instead of the importer. Residual *mutations* become
+rows too (`evidence_type` is then `SNP`, `DEL`, ...), because to a curator they are the same
+thing as a junction nobody explained; every row is positioned from `original_*`; a row
+matching a dismissed one of the previous set on type and position inherits the dismissal, and
+nothing inherits `resolved_mutation`, since a check that still reports the evidence means the
+mutation did not explain it. The import's rows are replaced outright. The check's HTML report
+goes under the sample as its **second report** (`store.sample_report_dir(pk, "check")`,
+`/mutations/report/<id>/check/`, core's viewer and sandbox), and the sample records the check
+under this component's `curation_check` key so the tab can say *as of*. `check_output(...,
+check=True)` also demands `data/original_coordinates.tsv`, which is what proves the apply
+happened. **No import lock**: nothing creates a sample, a population or a mutation.
+
+**Where the reads come from is decided at launch and recorded on the row**
+(`check_summary["reads_source"]`): the sample's kept copy, hard-linked into the run's
+`reads/` so the mate check's rename and every ending's rmtree touch only the run's entries;
+else an SRA re-fetch of the `KIND_SRA` entries in `Sample.inputs`; else a fresh drop on the
+check launcher -- and a check from a drop or a download keeps those reads for the next one.
+The launcher is `/breseq/check`, reached from **Check curation** on the Evidence tab and, via
+`register_sample_link`, the sample's page; it prefills the sample's last analysis options.
+The preflight writes the curated file into its scratch directory with the throwaway FASTQ, and
+a refusal naming `apply-check` is rewritten to name the build the flag arrived in, which is
+the one failure a check can meet that an analysis cannot. `--apply-check` typed into either
+arguments box is a 400: an input-file option given twice is a real ambiguity, not a case for
+"the box wins". A second check of a sample supersedes the first and leaves an in-flight
+analysis alone (`_supersede_in_flight(..., kind=)`).
+
+**The fake proves the frame.** Under `--apply-check`, `tests/fake_breseq.py` shifts every
+coordinate it writes by the net length of the applied indels before it and carries the
+unshifted value in `original_*`, drops the template's mutations and the evidence they were
+called from, and emits `FAKE_BRESEQ_CHECK_RESIDUAL` as residual lines -- so a row whose
+position comes out right is one the ingest read from the original fields.
+`FAKE_BRESEQ_NO_APPLY_CHECK` is the old-breseq refusal.
 
 ---
 
@@ -828,7 +915,7 @@ cd mutint && ./mutint test mutint_breseq
 
 There is no way to run them from mutint-core: the plugin is not installed there.
 
-**235 tests**, and the end-to-end ones are affordable because of two things. The test runner
+**471 tests**, and the end-to-end ones are affordable because of two things. The test runner
 forces `django.tasks` to its immediate backend, so `.enqueue()` runs inline and one POST
 exercises launch, the subprocess, the ingest and the cleanup. And `tests/fake_breseq.py` is a
 **real executable on disk** rather than a `subprocess.run` patch — the two things most likely

@@ -66,6 +66,12 @@
         if (run.status === "imported") {
             return '<span class="label label-success">Imported</span>';
         }
+        if (run.status === "checked") {
+            return '<span class="label label-success">Checked</span>';
+        }
+        if (run.status === "cancelled") {
+            return '<span class="label label-default">Cancelled</span>';
+        }
         if (run.status === "failed") {
             return '<span class="label label-danger">Failed</span>';
         }
@@ -90,7 +96,18 @@
 
     function resultCell(run) {
         var bits = [];
-        if (run.status === "imported") {
+        if (run.status === "checked") {
+            var summary = run.check_summary || {};
+            bits.push(esc(summary.residual_mutations) + " residual, " +
+                      esc(summary.evidence) + " evidence");
+            if (run.evidence_url) {
+                bits.push('<a href="' + run.evidence_url + '">Evidence</a>');
+            }
+            if (run.check_report_url) {
+                bits.push('<a href="' + run.check_report_url + '" target="_blank">' +
+                          "check report</a>");
+            }
+        } else if (run.status === "imported") {
             if (run.sample_id) {
                 bits.push('<a href="/mutations/breseq?experiment_id=' + EXPERIMENT_ID +
                           "&sample_id=" + run.sample_id + '">Mutations</a>');
@@ -169,7 +186,10 @@
                     "<th>Took</th><th>Result</th></tr></thead><tbody>"];
         runs.forEach(function (run) {
             html.push("<tr>",
-                      "<td>" + esc(run.sample_name) + "</td>",
+                      "<td>" + esc(run.sample_name) +
+                          (run.kind === "check"
+                               ? ' <span class="label label-default">check</span>' : "") +
+                          "</td>",
                       "<td>" + statusCell(run) + "</td>",
                       "<td><small>" + esc(whenLocal(run.started_at || run.created_at)) +
                           "</small></td>",

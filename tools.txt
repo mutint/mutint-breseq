@@ -112,7 +112,22 @@
 # so `tool_path("breseq")` is not sufficient on its own: the subprocess needs env/tools/bin
 # on PATH or breseq stops with `Required executable "bowtie2" not found`, having exited 0.
 # mutint_breseq/runner.py `tool_environment()` is what builds that PATH.
-https://barricklab.github.io/conda/::breseq-prerelease=*=g67b6320e_2
+#
+# **A second floor: g25617bb8, where `--apply-check` arrived.** A curation check
+# (`views.check_launch`, `runner.build_argv(apply_check=)`) puts it on the command line:
+# breseq applies the sample's curated mutations to the reference, analyses the same reads
+# against the result, and reports every entry in both coordinate systems -- `original_*`
+# fields on every line of `output.gd`, and the block map in `data/original_coordinates.tsv`.
+# Softer than gf7100f9a's floor: only a check needs the flag, an older breseq refuses it at
+# the check's own preflight and the refusal names this build, and ordinary runs pass nothing
+# new. The pin below is still what every install gets.
+#
+# **gd97757d0_2 is the build pinned**, read off both `osx-arm64` and `linux-64` repodata with
+# the cache defeated as above (2026-10-14); the `_2` is the rebuild suffix, as g67b6320e's
+# was. Between g67b6320e and it breseq changed no flag this plugin passes -- the commits are
+# `--apply-check` itself, `--realign all` and LN evidence, GenBank qualifier wrapping and
+# gdtools ANNOTATE options -- and the suite's fixture runs through it unchanged.
+https://barricklab.github.io/conda/::breseq-prerelease=*=gd97757d0_2
 
 # fastp trims adapters off the reads before breseq sees them, when a run asks for it -- which
 # is the default. bioconda has it, so no channel prefix; `--detect_adapter_for_pe` has been in

@@ -1,0 +1,188 @@
+{% extends 'base.html' %}
+{% load static %}
+{% load curate_tabs %}
+{% load breseq_extras %}
+
+{% block title %}{{ title }}{% endblock %}
+{% block scripts_and_style %}
+    <script src="{% static "vendor/sweetalert-2.1.2/sweetalert.min.js" %}"></script>
+    <style>
+        .evidence-table td { vertical-align: top; }
+        .evidence-table .evidence-summary { color: #555; font-size: 0.92em; }
+        .evidence-table .evidence-links a { margin-right: 0.6em; }
+        .evidence-table .evidence-actions { white-space: nowrap; }
+        .evidence-table tr.evidence-resolved td { color: #3c763d; }
+        .evidence-table tr.evidence-dismissed td { color: #999; }
+        #ev-form { border: 1px solid #ddd; border-radius: 4px; padding: 1em 1.2em;
+                   margin: 0.5em 0 1em; background: #fafafa; }
+    </style>
+{% endblock %}
+{% block header %}{% include "experiment_header.html" with page=template_header %}{% endblock %}
+
+{% block content %}
+    {% comment %} This page is the Evidence tab of the Curate page, so it wears Curate's own
+       strip: core's five tabs and this one, from mutint_common.curate_tab_registry. {% endcomment %}
+    {% curate_tabs 'evidence' %}
+    {% csrf_token %}
+
+    {{ schema|json_script:"mutation-schema" }}
+    {{ nearby|json_script:"evidence-nearby" }}
+    {{ rows|json_script:"evidence-rows" }}
+
+    {% if not sample_list %}
+        <p>This experiment has no samples yet.</p>
+    {% else %}
+        <div class="row">
+            <p style="color: #666;">
+                What breseq saw in the reads that no mutation accounts for &mdash; the
+                <i>unassigned evidence</i> of its report &mdash; one row per item, per sample.
+                Resolve a row by adding the mutation it points at, or by naming one the sample
+                already carries; dismiss what is not worth a mutation and say why. A row stays
+                resolved while its mutation is called in the sample, so deleting the call on the
+                Delete tab reopens it. Re-importing a sample replaces its evidence, dismissals
+                included.
+                {% if check_url %}
+                    <b>Check curation</b> re-runs breseq with the sample's curated mutations
+                    applied and replaces this list with what is left, in the ancestor's
+                    coordinates; dismissals are carried forward.
+                {% endif %}
+            </p>
+        </div>
+
+        <div class="btn-row" style="margin-bottom: 1em;">
+            <div class="btn-group">
+                <button type="button" class="btn btn-default dropdown-toggle" data-toggle="dropdown"
+                        aria-haspopup="true" aria-expanded="false">
+                    Sample: {{ selected_sample.label }} <span class="caret"></span>
+                </button>
+                <ul class="dropdown-menu mutint-menu">
+                    {% for sample in sample_list %}
+                        <li{% if sample.id == selected_sample_id %} class="active"{% endif %}>
+                            <a href="?experiment_id={{ experiment_id }}&amp;sample_id={{ sample.id }}&amp;status={{ status }}">{{ sample.label }}</a></li>
+                    {% endfor %}
+                </ul>
+            </div>
+            <div class="btn-group">
+                {% for choice in statuses %}
+                    <a class="btn btn-default{% if choice == status %} active{% endif %}"
+                       href="?experiment_id={{ experiment_id }}&amp;sample_id={{ selected_sample_id }}&amp;status={{ choice }}{% if type_filter %}&amp;type={{ type_filter }}{% endif %}">
+                        {{ choice|capfirst }}{% if choice != 'all' %} ({{ counts|dict_get:choice }}){% endif %}</a>
+                {% endfor %}
+            </div>
+            {% if types %}
+            <div class="btn-group">
+                <button type="button" class="btn btn-default dropdown-toggle" data-toggle="dropdown"
+                        aria-haspopup="true" aria-expanded="false">
+                    Type{% if type_filter %}: {{ type_filter }}{% endif %} <span class="caret"></span>
+                </button>
+                <ul class="dropdown-menu mutint-menu">
+                    <li{% if not type_filter %} class="active"{% endif %}>
+                        <a href="?experiment_id={{ experiment_id }}&amp;sample_id={{ selected_sample_id }}&amp;status={{ status }}">Every type</a></li>
+                    {% for kind in types %}
+                        <li{% if kind == type_filter %} class="active"{% endif %}>
+                            <a href="?experiment_id={{ experiment_id }}&amp;sample_id={{ selected_sample_id }}&amp;status={{ status }}&amp;type={{ kind }}">{{ kind }}</a></li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+            {% if check_url %}
+                <a class="btn btn-primary" href="{{ check_url }}">Check curation</a>
+            {% endif %}
+        </div>
+
+        <p style="color: #666;">
+            {% if check_record %}
+                As of the curation check on {{ check_record.at|slice:":16" }}: {{ check_record.residual_mutations }}
+                residual mutation(s) and {{ check_record.evidence }} item(s) of unassigned evidence,
+                in the coordinates of the original reference.
+            {% else %}
+                From the sample's own import.
+            {% endif %}
+            {% if not can_edit %}{% if lock_refusal %}{{ lock_refusal }}{% else %}Resolving evidence needs write access to this project.{% endif %}{% endif %}
+        </p>
+
+        {% if can_edit %}
+        <div id="ev-form" style="display: none;">
+            <h4 style="margin-top: 0;">Add a mutation for <span id="ev-form-locus"></span></h4>
+            <p class="help-block">breseq's own suggestion, where it has one; change anything.
+                The mutation is added to <b>{{ selected_sample.label }}</b> through the Add
+                tab's own rules, and the evidence row is resolved against it.</p>
+            {% if not has_reference %}
+            <div class="alert alert-warning">This experiment has no reference genome, so the
+                fields are checked for shape only.</div>
+            {% endif %}
+            <div class="form-group">
+                <label for="me-type">Mutation type</label>
+                <select class="form-control" id="me-type">
+                    {% for entry in schema.types %}
+                        <option value="{{ entry.name }}">{{ entry.label }}</option>
+                    {% endfor %}
+                </select>
+                <p class="help-block" id="me-type-help"></p>
+            </div>
+            {% include "curate/_mutation_fields.html" %}
+            <div class="form-group" data-field="frequency">
+                <label for="me-f-frequency">Frequency</label>
+                <input type="text" class="form-control" id="me-f-frequency"
+                       data-name="frequency" value="1.0">
+            </div>
+            <button type="button" class="btn btn-primary" id="ev-form-apply">+ Add mutation and resolve</button>
+            <button type="button" class="btn btn-link" id="ev-form-cancel">cancel</button>
+            <div id="me-error" style="color: #a00; margin-top: 0.5em; white-space: pre-line;"></div>
+        </div>
+        {% endif %}
+
+        {% if not rows %}
+            <p>No {% if status != 'all' %}{{ status }} {% endif %}evidence for this sample{% if type_filter %} of type {{ type_filter }}{% endif %}.</p>
+        {% else %}
+        <table class="table table-condensed evidence-table">
+            <thead><tr>
+                <th>Type</th><th>Position</th><th>What breseq saw</th><th>Status</th>
+                <th></th>{% if can_edit %}<th></th>{% endif %}
+            </tr></thead>
+            <tbody>
+            {% for row in rows %}
+                <tr class="evidence-{{ row.status }}" data-evidence-id="{{ row.id }}">
+                    <td><code>{{ row.type }}</code></td>
+                    <td>{{ row.locus }}</td>
+                    <td><span class="evidence-summary">{{ row.summary }}</span>
+                        {% if row.status == 'dismissed' and row.dismiss_note %}<br><i>{{ row.dismiss_note }}</i>{% endif %}</td>
+                    <td>{{ row.status }}{% if row.status == 'resolved' %}
+                        <a href="/curate/edit?experiment_id={{ experiment_id }}&amp;mutation_id={{ row.resolved_mutation_id }}&amp;sample_id={{ selected_sample_id }}">#{{ row.resolved_mutation_id }}</a>{% endif %}</td>
+                    <td class="evidence-links">
+                        {% if row.report_url %}<a href="{{ row.report_url }}" target="_blank" rel="noopener">report</a>{% endif %}
+                        {% if row.browse_url %}<a href="{{ row.browse_url }}" target="_blank" rel="noopener">reads</a>{% endif %}
+                        {% if row.browse_url_2 %}<a href="{{ row.browse_url_2 }}" target="_blank" rel="noopener">reads (side 2)</a>{% endif %}
+                    </td>
+                    {% if can_edit %}
+                    <td class="evidence-actions">
+                        {% if row.status == 'open' %}
+                            <button type="button" class="btn btn-xs btn-default" data-ev-add="{{ row.id }}">Add mutation{% if row.suggested_type %} ({{ row.suggested_type }}){% endif %}</button>
+                            <button type="button" class="btn btn-xs btn-default" data-ev-resolve="{{ row.id }}">Resolve with&hellip;</button>
+                            <button type="button" class="btn btn-xs btn-default" data-ev-dismiss="{{ row.id }}">Dismiss</button>
+                        {% else %}
+                            <button type="button" class="btn btn-xs btn-default" data-ev-reopen="{{ row.id }}">Reopen</button>
+                        {% endif %}
+                    </td>
+                    {% endif %}
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+    {% endif %}
+
+    {% if can_edit and sample_list %}
+    <script type="text/javascript">
+    {% include "curate/_mutation_form.js" %}
+    </script>
+    <script type="text/javascript">
+        window.mutintEvidenceConfig = {
+            experimentId: "{{ experiment_id }}",
+            sampleId: "{{ selected_sample_id }}",
+            nearbyBases: {{ nearby_bases }}
+        };
+    </script>
+    <script src="{% static "mutint_breseq/evidence.js" %}?v={{ asset_version }}"></script>
+    {% endif %}
+{% endblock %}

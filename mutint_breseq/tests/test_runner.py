@@ -302,3 +302,74 @@ class CleanupTestCase(SimpleTestCase):
         runner.cleanup_after_import(self.run_dir, self.output_dir)
         self.assertFalse(os.path.exists(os.path.join(self.run_dir, "reads")))
         self.assertFalse(os.path.exists(self.output_dir))
+
+
+class CheckArgvTestCase(SimpleTestCase):
+
+    def test_apply_check_sits_with_the_injected_defaults_before_the_output_directory(self):
+        argv = runner.build_argv("/bin/breseq", "/out/s1", [("-r", "/ref.gff3")], "-b 3",
+                                 ["r1.fastq"], apply_check="/run/curated.gd")
+        self.assertEqual("/run/curated.gd", argv[argv.index("--apply-check") + 1])
+        self.assertLess(argv.index("--apply-check"), argv.index("-o"))
+        self.assertLess(argv.index("-o"), argv.index("-b"))
+
+    def test_without_one_nothing_is_added(self):
+        argv = runner.build_argv("/bin/breseq", "/out/s1", [("-r", "/ref.gff3")], "",
+                                 ["r1.fastq"])
+        self.assertNotIn("--apply-check", argv)
+
+
+class KeptReadsTestCase(TestCase):
+
+    def setUp(self):
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+
+    def _reads(self, names):
+        reads_dir = os.path.join(self.work, "reads")
+        os.makedirs(reads_dir, exist_ok=True)
+        for name in names:
+            with open(os.path.join(reads_dir, name), "w") as handle:
+                handle.write(name)
+        return reads_dir
+
+    def test_keep_reads_moves_every_file_and_replaces_what_was_there(self):
+        reads_dir = self._reads(["a.fastq", "b.fastq"])
+        kept = os.path.join(self.work, "kept")
+        os.makedirs(kept)
+        with open(os.path.join(kept, "old.fastq"), "w") as handle:
+            handle.write("old")
+
+        self.assertEqual(["a.fastq", "b.fastq"], runner.keep_reads(reads_dir, kept))
+
+        self.assertEqual(["a.fastq", "b.fastq"], sorted(os.listdir(kept)))
+        self.assertEqual([], os.listdir(reads_dir))
+
+    def test_keep_reads_answers_nothing_for_a_missing_directory(self):
+        self.assertEqual([], runner.keep_reads(os.path.join(self.work, "nope"),
+                                               os.path.join(self.work, "kept")))
+
+    def test_link_reads_makes_hard_links_not_copies(self):
+        kept = self._reads(["a.fastq"])
+        reads_dir = os.path.join(self.work, "run", "reads")
+        self.assertEqual(["a.fastq"], runner.link_reads(kept, reads_dir))
+        source = os.stat(os.path.join(kept, "a.fastq"))
+        linked = os.stat(os.path.join(reads_dir, "a.fastq"))
+        self.assertEqual(source.st_ino, linked.st_ino)
+        # Renaming or removing the run's entry leaves the sample's.
+        os.remove(os.path.join(reads_dir, "a.fastq"))
+        self.assertTrue(os.path.isfile(os.path.join(kept, "a.fastq")))
+
+    def test_check_output_requires_the_coordinate_map_for_a_check(self):
+        output = os.path.join(self.work, "out")
+        for relative in runner.REQUIRED_OUTPUT:
+            path = os.path.join(output, relative)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as handle:
+                handle.write("x")
+        runner.check_output(output)
+        with self.assertRaises(runner.BreseqUnusable):
+            runner.check_output(output, check=True)
+        with open(os.path.join(output, runner.ORIGINAL_COORDINATES), "w") as handle:
+            handle.write("seq_id\n")
+        runner.check_output(output, check=True)

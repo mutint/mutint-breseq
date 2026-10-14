@@ -31,6 +31,9 @@ COMPONENT = "mutint_breseq"
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
 STATUS_IMPORTED = "imported"
+#: A curation check's success. `imported` would be a lie about a run that imported nothing
+#: -- a check leaves the sample's mutations alone and replaces its evidence.
+STATUS_CHECKED = "checked"
 STATUS_FAILED = "failed"
 STATUS_CANCELLED = "cancelled"
 
@@ -38,9 +41,18 @@ STATUS_CHOICES = [
     (STATUS_QUEUED, "Queued"),
     (STATUS_RUNNING, "Running"),
     (STATUS_IMPORTED, "Imported"),
+    (STATUS_CHECKED, "Checked"),
     (STATUS_FAILED, "Failed"),
     (STATUS_CANCELLED, "Cancelled"),
 ]
+
+#: What a run is for. An *analysis* runs breseq on reads and imports the result as a sample;
+#: a *check* runs breseq on the same reads with the sample's curated mutations applied first
+#: (`--apply-check`) and keeps what is left as the sample's evidence. Everything from the
+#: reads to breseq's exit is the same task; `kind` decides what happens to the output.
+KIND_ANALYSIS = "analysis"
+KIND_CHECK = "check"
+KIND_CHOICES = [(KIND_ANALYSIS, "Analysis"), (KIND_CHECK, "Curation check")]
 
 # `cancelled` was once absent, with a note saying nothing here could stop a running breseq
 # because the process belongs to the worker -- and a status the product cannot enforce is a
@@ -49,7 +61,7 @@ STATUS_CHOICES = [
 # task stops itself; see mutint_jobs.processes.run_tool. Keep the two joined: if the polling ever
 # goes, so must this status.
 
-FINISHED_STATUSES = (STATUS_IMPORTED, STATUS_FAILED, STATUS_CANCELLED)
+FINISHED_STATUSES = (STATUS_IMPORTED, STATUS_CHECKED, STATUS_FAILED, STATUS_CANCELLED)
 
 # breseq's output is verbose and its tail is the part that says what went wrong. Kept on the
 # row rather than in a file so it survives the directory being cleaned up after a success.
@@ -114,6 +126,16 @@ class BreseqRun(models.Model):
     # read sets, so there may be several things to say.
     notes = models.JSONField(default=list)
 
+    # Analysis or check -- see `KIND_ANALYSIS`. Decides what the task does with breseq's
+    # output and which tense `sample` below is read in.
+    kind = models.CharField(max_length=8, choices=KIND_CHOICES, default=KIND_ANALYSIS)
+    # What a check was handed and what it found: `exported` and `polymorphic_skipped` (how
+    # many mutations the curated `.gd` carried, and how many of those breseq applies no
+    # polymorphism for), `reads_source` (`kept`, `sra` or `drop`), and afterwards
+    # `residual_mutations`, `evidence` and `carried_dismissals` from the ingest. Shown on the
+    # run list; nothing queries it.
+    check_summary = models.JSONField(default=dict)
+
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_QUEUED)
     # django.tasks' own result id, for `run_breseq.get_result(...)`. Blank when the enqueue
     # itself failed, which is a state the page has to render rather than assume away.
@@ -125,9 +147,12 @@ class BreseqRun(models.Model):
     log = models.TextField(blank=True)
     error = models.TextField(blank=True)
 
-    # The sample the import produced. SET_NULL because deleting the sample -- through the
-    # sample editor, or by re-importing over it -- must not delete the record of the run that
-    # made it; the row then says what happened and no longer points anywhere.
+    # The sample the import produced -- or, for a check, **the sample being checked**, set
+    # at creation. One column read in two tenses, and `kind` says which; a second FK for the
+    # check would be the same SET_NULL pointing at the same table. SET_NULL because deleting
+    # the sample -- through the sample editor, or by re-importing over it -- must not delete
+    # the record of the run that made it; the row then says what happened and no longer
+    # points anywhere.
     #
     # It is also where breseq's HTML report went. This model carried a `report_stored` flag
     # and a `report/` directory of its own, and both are gone: mutint-core keeps the report
@@ -163,6 +188,18 @@ class BreseqRun(models.Model):
         from mutint_breseq.steps import TRIM
         return os.path.join(self.steps_dir(), TRIM)
 
+    @property
+    def is_check(self):
+        return self.kind == KIND_CHECK
+
+    def curated_gd_path(self):
+        """Where a check's curated GenomeDiff is written at launch, for `--apply-check`.
+
+        Kilobytes, kept through every ending -- it says what was checked, which the row's
+        summary counts but does not reproduce.
+        """
+        return os.path.join(self.directory(), "curated.gd")
+
     def producer_key(self):
         """What a read step keys its rows by until it is told which sample they became."""
         return "%s:%s" % (COMPONENT, self.pk)
@@ -197,3 +234,117 @@ def _remove_run_directory(sender, instance, **kwargs):
     except (ValueError, TypeError):
         # An unsaved instance has no pk to build a path from. Nothing to remove.
         logger.debug("no directory to remove for an unsaved BreseqRun")
+
+
+#: Where a row of evidence came from: the sample's own import, or a curation check.
+ORIGIN_IMPORT = "import"
+ORIGIN_CHECK = "check"
+ORIGIN_CHOICES = [(ORIGIN_IMPORT, "Import"), (ORIGIN_CHECK, "Curation check")]
+
+STATUS_OPEN = "open"
+STATUS_RESOLVED = "resolved"
+STATUS_DISMISSED = "dismissed"
+
+
+class Evidence(models.Model):
+    """One thing breseq saw in a sample's reads that no mutation accounts for.
+
+    breseq's index page lists it as *unassigned evidence*: a missing-coverage region, a new
+    junction, a copy-number change, a soft-clipped or discordant pile of reads -- each an
+    item of evidence (`MC`, `JC`, `CN`, `SC`, `DP`, `MP`, `PD`) whose id no mutation line
+    names in its evidence column and that carries no `reject=`. Core's importer keeps the
+    mutations and the MC regions out of a `.gd` and throws the rest away; this table keeps
+    exactly that list, per sample, so a curator can see from MutInt what breseq could not
+    explain and record what they did about it.
+
+    **A curation check writes the same table from the other side.** breseq re-run with the
+    sample's curated mutations applied (`--apply-check`) predicts whatever those mutations
+    did not account for, and every entry carries `original_*` coordinates -- the position in
+    the ancestor's frame, the one the curated file is in. Its residual *mutations* are rows
+    here too (`evidence_type` is then a mutation type, `SNP` or `DEL`), because to a curator
+    they are the same thing as a junction nobody explained: a loose end. `origin` says which
+    run a row came from, and a check replaces the import's rows outright.
+
+    **Positions are the ancestor's.** `seq_id`/`position`/`end` -- and the second side of a
+    junction -- are read from `original_*` where the record carries them, so a row from a
+    check lines up with the sample's stored mutations without arithmetic. A position inside
+    sequence an applied mutation inserted has no base of its own in the original; breseq
+    reports the last original base before it and an `original_<field>_offset`, which stays
+    in `record` and is shown as `+N`.
+
+    **Resolved is derived, not stored.** `resolved_mutation` names the curated mutation that
+    accounts for the row; the row *is* resolved while that mutation still has a call in this
+    sample. Delete the call on core's Delete tab and the row re-opens with no hook; restore
+    it and the row is resolved again. The FK is SET_NULL for a swept mutation, which is the
+    same answer. A dismissal is stored, with who and why: it is a person's decision about
+    the evidence rather than a fact derived from the mutations.
+    """
+
+    EVIDENCE_TYPES = ("MC", "JC", "CN", "SC", "DP", "MP", "PD")
+
+    sample = models.ForeignKey("mutint_sample.Sample", on_delete=models.CASCADE,
+                               related_name="breseq_evidence")
+    # `MC`, `JC`, ... for evidence; a mutation type (`SNP`, `DEL`, ...) for a residual
+    # prediction a check made. Three letters either way.
+    evidence_type = models.CharField(max_length=3)
+    seq_id = models.CharField(max_length=200)
+    position = models.IntegerField()
+    end = models.IntegerField(null=True, blank=True)
+    # Side 2 of a junction-shaped item (`JC`, `DP`, `PD`); null for everything else.
+    seq_id_2 = models.CharField(max_length=200, blank=True, default="")
+    position_2 = models.IntegerField(null=True, blank=True)
+    # breseq's own entry id, which names its page in the stored report:
+    # `evidence.html#JC_<id>.html`, `#MC_PLOT_<id>.html` (`views._PAGE_PREFIX`). Null for a
+    # record with no id.
+    source_id = models.IntegerField(null=True, blank=True)
+    origin = models.CharField(max_length=8, choices=ORIGIN_CHOICES, default=ORIGIN_IMPORT)
+    # The record's attributes, verbatim -- `original_*` and `*_offset` included -- the way
+    # `Mutation.genome_diff` keeps a mutation's. Read whole, per row, to draw a summary.
+    record = models.JSONField(default=dict)
+
+    resolved_mutation = models.ForeignKey("mutint_sample.Mutation", null=True, blank=True,
+                                          on_delete=models.SET_NULL, related_name="+")
+    dismissed_at = models.DateTimeField(null=True, blank=True)
+    dismissed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL,
+                                     related_name="+")
+    dismiss_note = models.TextField(blank=True, default="")
+
+    class Meta:
+        ordering = ["seq_id", "position", "pk"]
+        verbose_name_plural = "evidence"
+
+    def __str__(self):
+        return "%s %s:%s (sample %s)" % (self.evidence_type, self.seq_id, self.position,
+                                         self.sample_id)
+
+    @property
+    def is_junction(self):
+        return self.evidence_type in ("JC", "DP", "PD")
+
+    @property
+    def is_dismissed(self):
+        return self.dismissed_at is not None
+
+    @property
+    def is_resolved(self):
+        """Whether the mutation this was resolved against still has a call in the sample.
+
+        One query per row, asked only where a page draws the row; the list view asks it in
+        bulk through `evidence.statuses_for`.
+        """
+        if self.resolved_mutation_id is None:
+            return False
+        from mutint_sample.models import MutationCall
+        return MutationCall.objects.filter(
+            sample_id=self.sample_id, mutation_id=self.resolved_mutation_id).exists()
+
+    @property
+    def status(self):
+        if self.is_dismissed:
+            return STATUS_DISMISSED
+        return STATUS_RESOLVED if self.is_resolved else STATUS_OPEN
+
+    def match_key(self):
+        """What a check matches a row of the last run on, to carry a dismissal forward."""
+        return (self.evidence_type, self.seq_id, self.position, self.end,
+                self.seq_id_2, self.position_2)
