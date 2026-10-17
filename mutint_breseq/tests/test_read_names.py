@@ -89,6 +89,29 @@ class DerivationTestCase(SimpleTestCase):
             ["Ara-2_500gen_2_1.fastq.gz", "Ara-2_500gen_2_2.fastq.gz"])
         self.assertEqual(paired[0].name, "Ara-2_500gen_2")
 
+    def test_two_samples_whose_names_differ_by_one_digit_are_not_mates(self):
+        """`AP41_Cl1` and `AP42_Cl1` differ in exactly one `1`/`2`, and are two populations.
+
+        Once each file's own `_R1_001` is stripped, breseq's mate rule over the stripped names
+        would pair them and call the lot `AP4_Cl1`. A name whose read number was already
+        taken off is complete, so it stays out of that pass. Found in use.
+        """
+        derived = read_names.derive_samples([
+            "AP41_Cl1_R1_001.fastq.gz", "AP41_Cl1_R2_001.fastq.gz",
+            "AP42_Cl1_R1_001.fastq", "AP42_Cl1_R2_001.fastq"])
+        self.assertEqual([(sample.name, sample.files) for sample in derived], [
+            ("AP41_Cl1", ["AP41_Cl1_R1_001.fastq.gz", "AP41_Cl1_R2_001.fastq.gz"]),
+            ("AP42_Cl1", ["AP42_Cl1_R1_001.fastq", "AP42_Cl1_R2_001.fastq"])])
+
+        # Single-ended, the same two names are still two samples.
+        single = read_names.derive_samples(["AP41_Cl1_R1.fastq.gz", "AP42_Cl1_R1.fastq.gz"])
+        self.assertEqual([sample.name for sample in single], ["AP41_Cl1", "AP42_Cl1"])
+
+        # And bare-digit mates still pair whichever of them is seen first.
+        self.assertEqual(read_names.derive_samples(["x_2.fq", "lane_1.fq", "lane_2.fq", "x_1.fq"]),
+                         [read_names.DerivedSample("x", ["x_1.fq", "x_2.fq"]),
+                          read_names.DerivedSample("lane", ["lane_1.fq", "lane_2.fq"])])
+
     def test_a_trailing_chunk_index_needs_the_company_of_a_lane_or_a_read_number(self):
         # On its own, `001` is as likely to be an isolate as a bcl2fastq chunk.
         derived = read_names.derive_samples(["Ara-2_500gen_001.fastq.gz"])

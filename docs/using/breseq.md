@@ -124,9 +124,11 @@ to compare against.
 
 **Only decorations at the end of the name are removed.** The scan stops at the first thing that
 is not one, so a population genuinely called `R1` survives: `R1_500gen_x` is read as population
-R1, time point 500, sample x. When both mates *are* present, the read number is also found by
-comparing the two names, which is what catches a bare `lane_1.fq`/`lane_2.fq` with no `R` to
-announce itself.
+R1, time point 500, sample x. When both mates *are* present and neither name carries an
+`R1`/`R2`, the read number is also found by comparing the two names, which is what catches a
+bare `lane_1.fq`/`lane_2.fq` with no `R` to announce itself. A name that did carry one is taken
+as complete once it is removed, so `AP41_Cl1_R1_001` and `AP42_Cl1_R1_001` are two samples
+rather than mates whose names differ in one digit.
 
 | dropped | sample | placed as |
 |---|---|---|

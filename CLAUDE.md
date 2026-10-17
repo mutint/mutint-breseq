@@ -267,6 +267,13 @@ no lane left to mistake.
 **Sets deriving the same name merge into one sample**, which is what a lane split is: four
 files, one library, one sample.
 
+**A name whose `R1`/`R2` was stripped is kept out of the mate pass.** That pass exists for
+`lane_1.fq`/`lane_2.fq`, where nothing but the pairing rule can find the read number. Run over
+every stripped name it also paired `AP41_Cl1` with `AP42_Cl1` -- two populations, differing in
+exactly one `1`/`2` -- and merged their four files into a sample called `AP4_Cl1`. Found in
+use. A name that has already given up a read number is a whole sample's name, and the digits
+left in it are the sample's own.
+
 **A bare trailing `1`/`2` is only a read number when a mate was actually found.** `Ara-2_500gen_2`
 is a sample whose isolate is called 2, and a rule that ate it would file the sample at a time
 point with no isolate. Likewise a trailing `001` is only a chunk index in the company of a lane

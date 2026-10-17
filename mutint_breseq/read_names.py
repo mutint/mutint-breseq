@@ -94,7 +94,12 @@ def _is_decoration(token):
 
 
 def strip_decorations(name):
-    """One file's name with the extension, lane, read number and chunk index removed.
+    """One file's name with the extension, lane, read number and chunk index removed."""
+    return _strip(name)[0]
+
+
+def _strip(name):
+    """`(stripped name, whether a read number was among what was removed)`.
 
     Per file and by explicit pattern, and **that ordering is the whole of why this works**.
     The obvious alternative is to pair the files first and read the read number off the one
@@ -138,7 +143,8 @@ def strip_decorations(name):
     rejoined = kept[0] if kept else ""
     for index in range(1, len(kept)):
         rejoined += separators[index - 1] + kept[index]
-    return rejoined or base
+    read_number_removed = any(_READ_NUMBER.match(token) for token in tokens[end:])
+    return rejoined or base, read_number_removed
 
 
 def derive_samples(names, paired=True):
@@ -149,32 +155,56 @@ def derive_samples(names, paired=True):
     **The stripped name.** Everything that strips to `S12` is one sample -- which is what a
     lane split is, `S12_L001_*` and `S12_L002_*` being one library sequenced twice.
 
-    **Then breseq's mate rule, over the stripped names.** `lane_1.fq` and `lane_2.fq` are mates
-    with no `R` to say so, and nothing but the pairing rule can tell that trailing `1` from the
-    isolate in `Ara-2_500gen_2`. Applying it *after* stripping is what keeps it from mistaking
-    a lane digit for a read number: by then there is no lane left to mistake.
+    **Then breseq's mate rule, over the stripped names that still carry no read number.**
+    `lane_1.fq` and `lane_2.fq` are mates with no `R` to say so, and nothing but the pairing
+    rule can tell that trailing `1` from the isolate in `Ara-2_500gen_2`. Applying it *after*
+    stripping is what keeps it from mistaking a lane digit for a read number: by then there is
+    no lane left to mistake.
+
+    A name whose `R1`/`R2` was already stripped is kept out of that pass, because it is a whole
+    sample's name and the only digits left in it are the sample's own. `AP41_Cl1_R1_001` and
+    `AP42_Cl1_R1_001` strip to `AP41_Cl1` and `AP42_Cl1`, which differ in exactly one `1`/`2`
+    -- the population number -- and the mate rule merged two samples' four files into one
+    called `AP4_Cl1`. Found in use.
 
     `paired` is breseq's `--no-paired-mapping`, threaded through so a drop previews the way it
     will actually run.
     """
     order = []
     files_by_stripped = {}
+    # Stripped names that may still end in a bare mate number -- no file deriving them had an
+    # `R1`/`R2` to take off -- and are therefore the mate rule's to pair.
+    may_still_pair = set()
     for name in names:
-        stripped = strip_decorations(name)
+        stripped, read_number_removed = _strip(name)
         if stripped not in files_by_stripped:
             order.append(stripped)
             files_by_stripped[stripped] = []
+            may_still_pair.add(stripped)
         files_by_stripped[stripped].append(name)
+        if read_number_removed:
+            may_still_pair.discard(stripped)
 
+    # Keyed by every member, because a pair comes back R1 first whichever mate was seen first.
+    read_sets = {}
+    for read_set in pairing.read_file_sets(
+            [stripped for stripped in order if stripped in may_still_pair], paired=paired):
+        for member in read_set.files:
+            read_sets[member] = read_set
+    placed = set()
     derived = []
-    for read_set in pairing.read_file_sets(order, paired=paired):
+    for stripped in order:
+        if stripped in placed:
+            continue
+        read_set = read_sets.get(stripped, pairing.ReadFileSet(stripped, [stripped]))
+        placed.update(read_set.files)
         if len(read_set.files) == 2:
             name = _difference_removed(read_set.files[0], read_set.files[1])
         else:
             name = read_set.files[0]
         files = []
-        for stripped in read_set.files:
-            files.extend(files_by_stripped[stripped])
+        for member in read_set.files:
+            files.extend(files_by_stripped[member])
         # Both ends, and every separator: a name is the one the sample wears everywhere in
         # MutInt and the one its directory takes, so it should not end in the punctuation that
         # used to introduce something this stripped out.
