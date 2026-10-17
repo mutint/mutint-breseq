@@ -122,12 +122,22 @@
 # the check's own preflight and the refusal names this build, and ordinary runs pass nothing
 # new. The pin below is still what every install gets.
 #
-# **gd97757d0_2 is the build pinned**, read off both `osx-arm64` and `linux-64` repodata with
-# the cache defeated as above (2026-10-14); the `_2` is the rebuild suffix, as g67b6320e's
-# was. Between g67b6320e and it breseq changed no flag this plugin passes -- the commits are
-# `--apply-check` itself, `--realign all` and LN evidence, GenBank qualifier wrapping and
-# gdtools ANNOTATE options -- and the suite's fixture runs through it unchanged.
-https://barricklab.github.io/conda/::breseq-prerelease=*=gd97757d0_2
+# gd97757d0_2 was pinned 2026-10-14. Between g67b6320e and it breseq changed no flag this
+# plugin passes -- the commits are `--apply-check` itself, `--realign all` and LN evidence,
+# GenBank qualifier wrapping and gdtools ANNOTATE options -- and the suite's fixture runs
+# through it unchanged.
+#
+# **gf2421707_2 is the build pinned**, read off `osx-arm64` and `linux-64` repodata on the
+# channel's `gh-pages` branch (2026-10-17; the Pages URL was still serving the previous index
+# minutes after publish). It is the build where breseq makes seq ids safe on GFF3 feature rows
+# as well as on `##sequence-region` lines and FASTA headers, trims leading and trailing
+# underscores as its comment always claimed, refuses two sequences whose names collapse onto
+# one id instead of keeping the last, and grows `CONVERT-REFERENCE --list-seq-ids`. This
+# plugin passes nothing new; what the pin buys is that core's stored references -- which it
+# now writes in that safe spelling -- and the `.gd` breseq writes name a contig identically
+# whatever the uploaded file called it, and that mutint-core's `BreseqConformanceTestCase`
+# runs here rather than skipping. Older builds still run; they only lack the flag.
+https://barricklab.github.io/conda/::breseq-prerelease=*=gf2421707_2
 
 # fastp trims adapters off the reads before breseq sees them, when a run asks for it -- which
 # is the default. bioconda has it, so no channel prefix; `--detect_adapter_for_pe` has been in
